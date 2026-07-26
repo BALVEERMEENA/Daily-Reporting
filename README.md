@@ -124,6 +124,57 @@ each team's data lands somewhere only they can access. Wiring up Google Drive
 OAuth and the Drive API is left as a deployment-specific follow-up; the export
 endpoint and per-role scoping are already in place to build on.
 
+## Deploy to Fly.io
+
+The repo ships a `Dockerfile` and `fly.toml` ready for [Fly.io](https://fly.io),
+which runs the app as-is and keeps the SQLite database on a **free persistent
+volume** (data survives restarts and deploys).
+
+1. **Install flyctl and sign in:**
+   ```bash
+   curl -L https://fly.io/install.sh | sh
+   fly auth signup      # or: fly auth login
+   ```
+
+2. **Pick a globally-unique app name** and set it in `fly.toml` (`app = "..."`).
+   Adjust `primary_region` to a region near you if you like (default: `bom`,
+   Mumbai). Run the remaining commands from the repo directory so flyctl reads
+   `fly.toml`.
+
+3. **Create the app and its database volume** (region must match `fly.toml`):
+   ```bash
+   fly apps create your-app-name
+   fly volumes create data --region bom --size 1
+   ```
+
+4. **Set a strong token secret** (and optionally the admin password):
+   ```bash
+   fly secrets set JWT_SECRET=$(openssl rand -hex 32)
+   fly secrets set ADMIN_PASSWORD=your-strong-password
+   ```
+
+5. **Deploy:**
+   ```bash
+   fly deploy
+   ```
+
+Your app goes live at `https://your-app-name.fly.dev`. On first boot the
+bootstrap admin is created (`admin@example.com` / the `ADMIN_PASSWORD` you set,
+or `admin123` by default) — log in and change it immediately.
+
+**Notes**
+- The volume must exist **before** the first deploy (step 3), because `fly.toml`
+  mounts it at `/app/data`.
+- `min_machines_running = 0` scales the app to zero when idle to conserve the
+  free allowance; the first request after idle cold-starts in a few seconds. Set
+  it to `1` in `fly.toml` to keep it always warm.
+- Because the database is a single SQLite file on one volume, run a single
+  machine (don't scale to multiple instances).
+
+> **Why not GitHub Pages / Firebase Hosting?** Those host static files only and
+> cannot run this Node server or its database. This app needs a host that runs
+> Node with a persistent disk — hence Fly.io (or Render/Railway/a VPS).
+
 ## Configuration
 
 All optional — see `.env.example`:
