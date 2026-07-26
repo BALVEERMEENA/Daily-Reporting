@@ -1,0 +1,31 @@
+name: Deploy to Firebase
+
+# Deploys the Firestore security rules and the web/ frontend to Firebase
+# whenever main changes. You can also run it by hand from the Actions tab
+# (Run workflow). Requires one repository secret: FIREBASE_SERVICE_ACCOUNT
+# (the JSON key of a Firebase service account). The target project is read
+# from .firebaserc.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Write the service account key to a file
+        run: printf '%s' '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > "${{ runner.temp }}/service-account.json"
+
+      - name: Deploy Firestore rules and Hosting
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/service-account.json
+        run: npx --yes firebase-tools@latest deploy --only firestore:rules,hosting --non-interactive

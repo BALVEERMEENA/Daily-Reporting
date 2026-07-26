@@ -185,6 +185,28 @@ Because there's no server seed, create the very first admin by hand:
    admin creates departments, users (their Auth accounts are created for them),
    questionnaires, assignments, and tasks — no more console work needed.
 
+### Automated deploy from GitHub (no command line)
+
+For a phone-only / no-PC workflow, `.github/workflows/firebase-deploy.yml`
+deploys the rules and frontend automatically whenever `main` changes. Set it up
+entirely in the browser:
+
+1. **Firebase console → Project settings (gear) → Service accounts →
+   Generate new private key.** This downloads a JSON file. If deploys later fail
+   with a permissions error, grant that service account the **Editor** role in
+   Google Cloud console → IAM.
+2. **GitHub → your repo → Settings → Secrets and variables → Actions →
+   New repository secret.** Name it exactly `FIREBASE_SERVICE_ACCOUNT` and paste
+   the entire contents of that JSON file as the value.
+3. Using GitHub's web editor (the pencil icon), fill in `web/firebase-config.js`
+   and `.firebaserc` with your real values, and commit.
+4. Merge to `main` (e.g. merge the pull request). The merge triggers the
+   workflow and deploys; watch it under the repo's **Actions** tab. After the
+   first run you can also redeploy anytime with **Actions → Deploy to Firebase →
+   Run workflow.**
+
+Then do the one-time admin bootstrap (step 4 above) and you're live.
+
 ### Local testing with the emulator
 
 ```bash
