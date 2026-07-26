@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Reporting</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Public report-by-code view (shown when not logged in or via "Report with a code") -->
+  <div id="view-code" class="view">
+    <div class="card code-card">
+      <h1>Daily Reporting</h1>
+      <p class="muted">Enter the code your manager gave you to open your report.</p>
+      <form id="code-form">
+        <input id="code-input" class="code-entry" placeholder="XXXX-XXXX" autocomplete="off" />
+        <button type="submit" class="btn primary">Open</button>
+      </form>
+      <div id="code-error" class="error"></div>
+      <div id="questionnaire-container"></div>
+      <p class="switch"><a href="#" id="to-login">Staff / admin login →</a></p>
+    </div>
+  </div>
+
+  <!-- Login view -->
+  <div id="view-login" class="view hidden">
+    <div class="card login-card">
+      <h1>Sign in</h1>
+      <form id="login-form">
+        <label>Email<input id="login-email" type="email" required /></label>
+        <label>Password<input id="login-password" type="password" required /></label>
+        <button type="submit" class="btn primary">Sign in</button>
+      </form>
+      <div id="login-error" class="error"></div>
+      <p class="switch"><a href="#" id="to-code">← Report with a code</a></p>
+    </div>
+  </div>
+
+  <!-- Authenticated app shell -->
+  <div id="view-app" class="view hidden">
+    <header class="topbar">
+      <div class="brand">Daily Reporting</div>
+      <nav id="nav"></nav>
+      <div class="topbar-right">
+        <button id="bell" class="bell" title="Notifications">🔔<span id="bell-count" class="badge hidden">0</span></button>
+        <span id="user-label" class="user-label"></span>
+        <button id="logout" class="btn ghost small">Logout</button>
+      </div>
+    </header>
+    <div id="notif-panel" class="notif-panel hidden"></div>
+    <main id="page" class="page"></main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
