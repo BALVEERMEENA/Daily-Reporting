@@ -21,14 +21,24 @@ notifications), and everyone can review the data they're allowed to see.
 - **Own-data access** — employees see the reports they submitted; heads see their department; admins see all.
 - **Export** — download the reports you're allowed to see as CSV (drop-in point for Google Drive sync — see below).
 
-## Tech stack
+## Two ways to run it
 
-- **Backend:** Node.js + Express
-- **Database:** SQLite (via `better-sqlite3`) — a single file, no external service
-- **Auth:** JWT bearer tokens, bcrypt-hashed passwords
-- **Frontend:** dependency-free vanilla JS (no build step)
+This repo ships the same app in two forms — pick one:
 
-## Getting started
+| | **Firebase** (in `web/`) | **Self-hosted** (in `server/` + `public/`) |
+|---|---|---|
+| Hosting | Firebase Hosting (static) | Any Node host (Fly.io, a VPS…) |
+| Backend | None — the browser talks to Firestore directly | Node.js + Express |
+| Database | Firestore | SQLite |
+| Auth | Firebase Auth | JWT + bcrypt |
+| Access control | **Firestore security rules** (`firestore.rules`) | Enforced in Express routes |
+| Cost | Free (Spark plan, no card) | Host-dependent |
+
+If you're deploying to Firebase, use the **[Deploy to Firebase](#deploy-to-firebase)**
+section below and you can ignore the `server/` directory. The two share nothing
+at runtime — they're independent implementations of the same product.
+
+## Getting started (self-hosted version)
 
 ```bash
 npm install
@@ -124,7 +134,71 @@ each team's data lands somewhere only they can access. Wiring up Google Drive
 OAuth and the Drive API is left as a deployment-specific follow-up; the export
 endpoint and per-role scoping are already in place to build on.
 
-## Deploy to Fly.io
+## Deploy to Firebase
+
+The `web/` directory is a self-contained Firebase app: **Firebase Hosting** for
+the frontend, **Firebase Auth** for login, and **Firestore** for data. There is
+no server — all access control is enforced by the security rules in
+`firestore.rules` (validated by an emulator test suite covering role scoping,
+the public code flow, and privilege-escalation guards). This runs on the free
+**Spark plan** (no credit card).
+
+### 1. Create the Firebase project
+
+1. Go to the [Firebase console](https://console.firebase.google.com) → **Add project**.
+2. **Build → Authentication → Get started → Email/Password → Enable.**
+3. **Build → Firestore Database → Create database** (start in production mode; the rules below lock it down).
+
+### 2. Connect this repo
+
+1. Install the CLI and log in:
+   ```bash
+   npm install -g firebase-tools
+   firebase login
+   ```
+2. Put your project id in `.firebaserc` (replace `YOUR_FIREBASE_PROJECT_ID`), or run `firebase use --add`.
+3. Paste your web config into `web/firebase-config.js` — get it from
+   **Project settings → General → Your apps → Web app** (create a web app if you
+   don't have one). These values are not secrets.
+
+### 3. Deploy
+
+```bash
+firebase deploy --only firestore:rules,hosting
+```
+
+Your app goes live at `https://YOUR_PROJECT_ID.web.app`.
+
+### 4. Create the first admin (one-time bootstrap)
+
+Because there's no server seed, create the very first admin by hand:
+
+1. **Authentication → Users → Add user** — enter the admin's email + password.
+   Copy the generated **User UID**.
+2. **Firestore Database → Start collection** named `users`. Add a document whose
+   **Document ID is that UID**, with fields:
+   - `name` (string) — e.g. "Administrator"
+   - `email` (string) — the same email
+   - `role` (string) — `admin`
+   - `departmentId` (string, or leave null)
+3. Open the site, click **Staff / admin login**, and sign in. From there the
+   admin creates departments, users (their Auth accounts are created for them),
+   questionnaires, assignments, and tasks — no more console work needed.
+
+### Local testing with the emulator
+
+```bash
+firebase emulators:start
+```
+
+serves Hosting + Firestore locally so you can try everything before deploying.
+
+> **Note on user deletion:** removing a user in the app deletes their Firestore
+> profile (which revokes all access). Their Firebase **Auth** login still exists
+> until you also remove it under **Authentication → Users** — deleting Auth
+> accounts requires admin privileges the browser can't hold.
+
+## Deploy to Fly.io (self-hosted version)
 
 The repo ships a `Dockerfile` and `fly.toml` ready for [Fly.io](https://fly.io),
 which runs the app as-is and keeps the SQLite database on a **free persistent

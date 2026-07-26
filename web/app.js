@@ -1,0 +1,716 @@
+// Daily Reporting — pure client-side Firebase app (Auth + Firestore).
+// All access control is enforced by firestore.rules; this file is the UI and
+// the data calls. No backend server is involved.
+
+import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, signOut,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import {
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, addDoc,
+  updateDoc, deleteDoc, query, where, serverTimestamp, writeBatch,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { firebaseConfig } from './firebase-config.js';
+
+/* ------------------------------------------------------------------ *
+ * Firebase init
+ * ------------------------------------------------------------------ */
+const CONFIG_READY = !String(firebaseConfig.apiKey || '').startsWith('REPLACE');
+const app = CONFIG_READY ? initializeApp(firebaseConfig) : null;
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
+
+/* ------------------------------------------------------------------ *
+ * DOM helpers
+ * ------------------------------------------------------------------ */
+const $ = (s, r = document) => r.querySelector(s);
+const root = () => $('#root');
+const el = (tag, attrs = {}, ...children) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'html') n.innerHTML = v;
+    else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c == null || c === false) continue;
+    n.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return n;
+};
+function toast(msg, isErr = false) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast' + (isErr ? ' err' : '');
+  setTimeout(() => t.classList.add('hidden'), 3200);
+}
+function fmtDate(v) {
+  if (!v) return '';
+  const d = v.toDate ? v.toDate() : new Date(v);
+  return isNaN(d) ? '' : d.toLocaleString();
+}
+function millis(v) { return v && v.toDate ? v.toDate().getTime() : (v ? new Date(v).getTime() : 0); }
+function friendlyError(err) {
+  const c = (err && err.code) || '';
+  if (c === 'auth/invalid-credential' || c === 'auth/wrong-password' || c === 'auth/user-not-found')
+    return 'Invalid email or password.';
+  if (c === 'auth/email-already-in-use') return 'A user with that email already exists.';
+  if (c === 'auth/weak-password') return 'Password should be at least 6 characters.';
+  if (c === 'permission-denied') return 'You do not have permission to do that.';
+  return (err && err.message) || 'Something went wrong.';
+}
+
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
+const state = { user: null, page: null, notifications: [] };
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function genCode() {
+  const pick = (n) => Array.from({ length: n }, () =>
+    CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
+  return `${pick(4)}-${pick(4)}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Firestore data layer
+ * ------------------------------------------------------------------ */
+const colRef = (name) => collection(db, name);
+const snapList = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+async function getAll(name) { return snapList(await getDocs(colRef(name))); }
+async function getWhere(name, field, value) {
+  return snapList(await getDocs(query(colRef(name), where(field, '==', value))));
+}
+const byCreatedDesc = (a, b) => millis(b.createdAt) - millis(a.createdAt);
+const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''));
+
+async function listUsers() {
+  const rows = state.user.role === 'admin'
+    ? await getAll('users')
+    : await getWhere('users', 'departmentId', state.user.departmentId);
+  return rows.sort(byName);
+}
+async function listDepartments() { return (await getAll('departments')).sort(byName); }
+async function listQuestionnaires() {
+  const rows = state.user.role === 'admin'
+    ? await getAll('questionnaires')
+    : await getWhere('questionnaires', 'departmentId', state.user.departmentId);
+  return rows.sort(byCreatedDesc);
+}
+async function listReports() {
+  let rows;
+  if (state.user.role === 'admin') rows = await getAll('submissions');
+  else if (state.user.role === 'dept_head') rows = await getWhere('submissions', 'departmentId', state.user.departmentId);
+  else rows = await getWhere('submissions', 'userId', state.user.uid);
+  return rows.sort((a, b) => millis(b.submittedAt) - millis(a.submittedAt));
+}
+async function listTasks() {
+  let rows;
+  if (state.user.role === 'admin') rows = await getAll('tasks');
+  else if (state.user.role === 'dept_head') rows = await getWhere('tasks', 'departmentId', state.user.departmentId);
+  else rows = await getWhere('tasks', 'assignedTo', state.user.uid);
+  return rows.sort(byCreatedDesc);
+}
+async function listNotifications() {
+  return (await getWhere('notifications', 'userId', state.user.uid))
+    .sort((a, b) => millis(b.createdAt) - millis(a.createdAt));
+}
+
+/** Create a Firebase Auth user without disturbing the current admin session,
+ *  by using a throwaway secondary app instance. Returns the new uid. */
+async function createAuthUser(email, password) {
+  const secondary = initializeApp(firebaseConfig, 'secondary-' + Date.now());
+  const secAuth = getAuth(secondary);
+  try {
+    const cred = await createUserWithEmailAndPassword(secAuth, email, password);
+    await signOut(secAuth);
+    return cred.user.uid;
+  } finally {
+    await deleteApp(secondary);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+function boot() {
+  if (!CONFIG_READY) return renderConfigNotice();
+  onAuthStateChanged(auth, async (fbUser) => {
+    if (!fbUser) { state.user = null; return renderPublic(); }
+    try {
+      const profile = await getDoc(doc(db, 'users', fbUser.uid));
+      if (!profile.exists()) return renderNoProfile(fbUser);
+      state.user = { uid: fbUser.uid, email: fbUser.email, ...profile.data() };
+      enterApp();
+    } catch (err) {
+      renderNoProfile(fbUser, friendlyError(err));
+    }
+  });
+}
+
+function renderConfigNotice() {
+  root().innerHTML = '';
+  root().append(centered(el('div', { class: 'card', style: 'max-width:560px' },
+    el('h1', {}, 'Almost there'),
+    el('p', { class: 'muted' }, 'Firebase is not configured yet. Edit '),
+    el('pre', { style: 'background:#f1f5f9;padding:12px;border-radius:8px;overflow:auto' }, 'web/firebase-config.js'),
+    el('p', { class: 'muted' }, 'and paste your project\'s web config (Firebase console → Project settings → Your apps → Web). Then reload this page.'))));
+}
+function renderNoProfile(fbUser, extra) {
+  root().innerHTML = '';
+  root().append(centered(el('div', { class: 'card', style: 'max-width:520px' },
+    el('h1', {}, 'No access yet'),
+    el('p', { class: 'muted' }, `You're signed in as ${fbUser.email}, but this account has no profile. An admin needs to add you before you can use the app.`),
+    extra ? el('p', { class: 'error' }, extra) : null,
+    el('button', { class: 'btn', onclick: () => signOut(auth) }, 'Sign out'))));
+}
+
+function centered(cardNode) {
+  return el('div', { style: 'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px' }, cardNode);
+}
+
+/* ------------------------------------------------------------------ *
+ * Public: report with a code / login
+ * ------------------------------------------------------------------ */
+function renderPublic() {
+  root().innerHTML = '';
+  const codeInput = el('input', { class: 'code-entry', placeholder: 'XXXX-XXXX', autocomplete: 'off' });
+  const errBox = el('div', { class: 'error' });
+  const container = el('div', {});
+  const form = el('form', {}, codeInput, el('button', { type: 'submit', class: 'btn primary' }, 'Open'));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errBox.textContent = '';
+    container.innerHTML = '';
+    const code = codeInput.value.trim().toUpperCase();
+    if (!code) return;
+    try {
+      const snap = await getDoc(doc(db, 'codes', code));
+      if (!snap.exists() || snap.data().active !== true) throw new Error('That code is not valid. Please check and try again.');
+      const codeData = snap.data();
+      const qn = await getDoc(doc(db, 'questionnaires', codeData.questionnaireId));
+      if (!qn.exists() || qn.data().active !== true) throw new Error('This questionnaire is no longer accepting responses.');
+      renderReportForm(code, codeData, { id: qn.id, ...qn.data() }, container);
+    } catch (err) {
+      errBox.textContent = friendlyError(err);
+    }
+  });
+
+  const card = el('div', { class: 'card code-card' },
+    el('h1', {}, 'Daily Reporting'),
+    el('p', { class: 'muted' }, 'Enter the code your manager gave you to open your report.'),
+    form, errBox, container,
+    el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →')));
+  root().append(centered(card));
+}
+
+function renderLogin() {
+  root().innerHTML = '';
+  const email = el('input', { type: 'email', required: true });
+  const password = el('input', { type: 'password', required: true });
+  const errBox = el('div', { class: 'error' });
+  const form = el('form', {},
+    el('label', {}, 'Email', email),
+    el('label', {}, 'Password', password),
+    el('button', { type: 'submit', class: 'btn primary' }, 'Sign in'));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errBox.textContent = '';
+    try { await signInWithEmailAndPassword(auth, email.value.trim(), password.value); }
+    catch (err) { errBox.textContent = friendlyError(err); }
+  });
+  root().append(centered(el('div', { class: 'card login-card' },
+    el('h1', {}, 'Sign in'), form, errBox,
+    el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderPublic(); } }, '← Report with a code')))));
+}
+
+function renderReportForm(code, codeData, qn, container) {
+  container.innerHTML = '';
+  const form = el('form', {});
+  form.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.userName || ''}`)), el('h2', {}, qn.title),
+    qn.description ? el('p', { class: 'muted' }, qn.description) : null);
+  const questions = (qn.questions || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0));
+  const inputs = [];
+  questions.forEach((q) => { const { node, get } = fieldFor(q); form.append(node); inputs.push({ q, get }); });
+  const errBox = el('div', { class: 'error' });
+  const btn = el('button', { type: 'submit', class: 'btn primary' }, 'Submit report');
+  form.append(errBox, btn);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errBox.textContent = '';
+    for (const { q, get } of inputs) {
+      const v = get();
+      const empty = v == null || (Array.isArray(v) ? v.length === 0 : String(v).trim() === '');
+      if (q.required && empty) { errBox.textContent = `"${q.text}" is required.`; return; }
+    }
+    btn.disabled = true;
+    try {
+      await addDoc(colRef('submissions'), {
+        code,
+        assignmentId: codeData.assignmentId,
+        questionnaireId: codeData.questionnaireId,
+        questionnaireTitle: qn.title,
+        userId: codeData.userId,
+        userName: codeData.userName || '',
+        departmentId: codeData.departmentId ?? null,
+        answers: inputs.map(({ q, get }) => ({
+          questionId: q.id, question: q.text,
+          value: Array.isArray(get()) ? get().join(', ') : String(get()),
+        })),
+        submittedAt: serverTimestamp(),
+      });
+      container.innerHTML = '';
+      container.append(el('div', { class: 'card', style: 'text-align:center;margin-top:16px' },
+        el('h2', {}, '✓ Report submitted'),
+        el('p', { class: 'muted' }, 'Thank you. Your report has been recorded.'),
+        el('button', { class: 'btn', onclick: () => renderPublic() }, 'Done')));
+    } catch (err) {
+      errBox.textContent = friendlyError(err);
+      btn.disabled = false;
+    }
+  });
+  container.append(form);
+}
+
+function fieldFor(q) {
+  const label = el('label', {}, q.text + (q.required ? ' *' : ''));
+  let getter;
+  const opts = q.options || [];
+  if (q.type === 'textarea') { const i = el('textarea', {}); label.append(i); getter = () => i.value; }
+  else if (q.type === 'number') { const i = el('input', { type: 'number', step: 'any' }); label.append(i); getter = () => i.value; }
+  else if (q.type === 'date') { const i = el('input', { type: 'date' }); label.append(i); getter = () => i.value; }
+  else if (q.type === 'select') {
+    const s = el('select', {}, el('option', { value: '' }, '— choose —'), ...opts.map((o) => el('option', { value: o }, o)));
+    label.append(s); getter = () => s.value;
+  } else if (q.type === 'radio') {
+    const w = el('div', { class: 'checkbox-list' });
+    const name = 'r' + Math.random().toString(36).slice(2);
+    opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'radio', name, value: o }), o)));
+    label.append(w); getter = () => (w.querySelector('input:checked') || {}).value || '';
+  } else if (q.type === 'checkbox') {
+    const w = el('div', { class: 'checkbox-list' });
+    opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
+    label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
+  } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
+  return { node: label, get: getter };
+}
+
+/* ------------------------------------------------------------------ *
+ * Authenticated app shell
+ * ------------------------------------------------------------------ */
+const PAGES = {
+  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks'],
+  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks'],
+  employee: ['tasks', 'reports'],
+};
+const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks' };
+
+function enterApp() {
+  root().innerHTML = '';
+  const nav = el('nav', { id: 'nav' });
+  const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
+  const bell = el('button', { class: 'bell', title: 'Notifications', onclick: toggleNotifications }, '🔔', bellCount);
+  const panel = el('div', { id: 'notif-panel', class: 'notif-panel hidden' });
+  const shell = el('div', {},
+    el('header', { class: 'topbar' },
+      el('div', { class: 'brand' }, 'Daily Reporting'), nav,
+      el('div', { class: 'topbar-right' }, bell,
+        el('span', { class: 'user-label' }, `${state.user.name} · ${state.user.role.replace('_', ' ')}`),
+        el('button', { class: 'btn ghost small', onclick: () => signOut(auth) }, 'Logout'))),
+    panel, el('main', { id: 'page', class: 'page' }));
+  root().append(shell);
+
+  const pages = PAGES[state.user.role] || ['reports'];
+  pages.forEach((p) => nav.append(el('button', {
+    class: 'nav-item', 'data-page': p, onclick: () => navigate(p),
+  }, state.user.role === 'employee' && p === 'reports' ? 'My Reports'
+    : state.user.role === 'employee' && p === 'tasks' ? 'My Tasks' : LABELS[p])));
+  navigate(pages[0]);
+  refreshNotifications();
+  if (!state._notifTimer) state._notifTimer = setInterval(refreshNotifications, 30000);
+}
+
+const ROUTES = {
+  dashboard: renderDashboard, departments: renderDepartments,
+  users: () => renderUsers(false), team: () => renderUsers(true),
+  questionnaires: renderQuestionnaires, reports: renderReports, tasks: renderTasks,
+};
+function navigate(page) {
+  state.page = page;
+  document.querySelectorAll('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
+  $('#notif-panel') && $('#notif-panel').classList.add('hidden');
+  (ROUTES[page] || renderReports)();
+}
+function pageHead(title, actions = []) {
+  return el('div', { class: 'page-head' }, el('h2', {}, title), el('div', { class: 'inline' }, ...actions));
+}
+async function withPage(fn) {
+  const page = $('#page');
+  page.innerHTML = 'Loading…';
+  try { const node = await fn(); page.innerHTML = ''; page.append(...[].concat(node)); }
+  catch (err) { page.innerHTML = ''; page.append(el('div', { class: 'empty' }, friendlyError(err))); }
+}
+
+/* ---- Notifications ---- */
+async function refreshNotifications() {
+  try {
+    state.notifications = await listNotifications();
+    const unread = state.notifications.filter((n) => !n.isRead).length;
+    const badge = $('#bell-count');
+    if (badge) { badge.textContent = unread; badge.classList.toggle('hidden', unread === 0); }
+  } catch { /* ignore */ }
+}
+function toggleNotifications() {
+  const panel = $('#notif-panel');
+  if (!panel.classList.contains('hidden')) return panel.classList.add('hidden');
+  panel.innerHTML = '';
+  panel.append(el('div', { class: 'notif-head' }, el('strong', {}, 'Notifications'),
+    el('button', { class: 'btn ghost small', onclick: markAllRead }, 'Mark all read')));
+  if (!state.notifications.length) panel.append(el('div', { class: 'notif-item muted' }, 'No notifications yet.'));
+  else state.notifications.forEach((n) => panel.append(el('div', { class: 'notif-item' + (n.isRead ? '' : ' unread') },
+    el('div', {}, n.message), el('div', { class: 'time' }, fmtDate(n.createdAt)))));
+  panel.classList.remove('hidden');
+}
+async function markAllRead() {
+  const batch = writeBatch(db);
+  state.notifications.filter((n) => !n.isRead).forEach((n) => batch.update(doc(db, 'notifications', n.id), { isRead: true }));
+  await batch.commit();
+  await refreshNotifications();
+  toggleNotifications();
+}
+
+/* ---- Modal ---- */
+function modal(title, contentNode, onSubmit, submitLabel = 'Save') {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  const err = el('div', { class: 'error' });
+  const form = el('form', { class: 'modal' }, el('h3', {}, title), contentNode, err,
+    el('div', { class: 'modal-actions' },
+      el('button', { type: 'button', class: 'btn ghost', onclick: () => backdrop.remove() }, 'Cancel'),
+      el('button', { type: 'submit', class: 'btn primary', style: 'width:auto' }, submitLabel)));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault(); err.textContent = '';
+    try { await onSubmit(); backdrop.remove(); } catch (ex) { err.textContent = friendlyError(ex); }
+  });
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  backdrop.append(form);
+  document.body.append(backdrop);
+  return backdrop;
+}
+function infoModal(title, contentNode) {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  backdrop.append(el('div', { class: 'modal' }, el('h3', {}, title), contentNode,
+    el('div', { class: 'modal-actions' }, el('button', { class: 'btn primary', style: 'width:auto', onclick: () => backdrop.remove() }, 'Close'))));
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  document.body.append(backdrop);
+  return backdrop;
+}
+
+/* ---- Dashboard ---- */
+async function renderDashboard() {
+  await withPage(async () => {
+    const [reports, tasks] = await Promise.all([listReports(), listTasks()]);
+    const openTasks = tasks.filter((t) => t.status !== 'done').length;
+    const nodes = [pageHead(`Welcome, ${state.user.name}`),
+      el('div', { class: 'grid' },
+        tile('Reports', reports.length, 'in view'),
+        tile('Open tasks', openTasks, `of ${tasks.length} total`),
+        tile('Unread alerts', state.notifications.filter((n) => !n.isRead).length, 'notifications')),
+      el('h3', { style: 'margin-top:28px' }, 'Recent reports'), reportsTable(reports.slice(0, 8))];
+    return nodes;
+  });
+}
+function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
+
+/* ---- Departments ---- */
+async function renderDepartments() {
+  await withPage(async () => {
+    const [departments, users] = await Promise.all([listDepartments(), listUsers()]);
+    const head = pageHead('Departments', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => departmentModal(null, users) }, '+ New department')]);
+    if (!departments.length) return [head, el('div', { class: 'empty' }, 'No departments yet.')];
+    const tbody = el('tbody');
+    departments.forEach((d) => {
+      const memberCount = users.filter((u) => u.departmentId === d.id).length;
+      const headName = (users.find((u) => u.id === d.headUserId) || {}).name || '—';
+      tbody.append(el('tr', {}, el('td', {}, d.name), el('td', {}, headName), el('td', {}, String(memberCount)),
+        el('td', {}, el('div', { class: 'row-actions' },
+          el('button', { class: 'btn ghost small', onclick: () => departmentModal(d, users) }, 'Edit'),
+          el('button', { class: 'btn danger small', onclick: () => delDepartment(d, users) }, 'Delete')))));
+    });
+    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Head'), el('th', {}, 'Members'), el('th', {}, ''))), tbody)];
+  });
+}
+function departmentModal(dept, users) {
+  const name = el('input', { value: dept ? dept.name : '', required: true });
+  const head = el('select', {}, el('option', { value: '' }, '— none —'),
+    ...users.map((u) => el('option', { value: u.id, selected: dept && dept.headUserId === u.id }, `${u.name} (${u.email})`)));
+  modal(dept ? 'Edit department' : 'New department',
+    el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Department head', head)), async () => {
+      const headId = head.value || null;
+      if (dept) await updateDoc(doc(db, 'departments', dept.id), { name: name.value.trim(), headUserId: headId });
+      else {
+        const ref = await addDoc(colRef('departments'), { name: name.value.trim(), headUserId: headId, createdAt: serverTimestamp() });
+        dept = { id: ref.id };
+      }
+      if (headId) await updateDoc(doc(db, 'users', headId), { role: 'dept_head', departmentId: dept.id });
+      toast('Department saved'); renderDepartments();
+    });
+}
+async function delDepartment(d, users) {
+  if (!confirm(`Delete department "${d.name}"? Members will be unassigned.`)) return;
+  const batch = writeBatch(db);
+  users.filter((u) => u.departmentId === d.id).forEach((u) => batch.update(doc(db, 'users', u.id), { departmentId: null }));
+  batch.delete(doc(db, 'departments', d.id));
+  await batch.commit();
+  toast('Department deleted'); renderDepartments();
+}
+
+/* ---- Users / Team ---- */
+async function renderUsers(teamOnly) {
+  await withPage(async () => {
+    const [users, departments] = await Promise.all([listUsers(), listDepartments().catch(() => [])]);
+    const deptName = (id) => (departments.find((d) => d.id === id) || {}).name || '—';
+    const head = pageHead(teamOnly ? 'My Team' : 'Users', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => userModal(null, departments) }, '+ Add user')]);
+    const tbody = el('tbody');
+    users.forEach((u) => tbody.append(el('tr', {},
+      el('td', {}, u.name), el('td', {}, u.email),
+      el('td', {}, el('span', { class: 'pill ' + u.role }, u.role.replace('_', ' '))),
+      el('td', {}, deptName(u.departmentId)),
+      el('td', {}, el('div', { class: 'row-actions' },
+        state.user.role === 'admin' ? el('button', { class: 'btn ghost small', onclick: () => userModal(u, departments) }, 'Edit') : null,
+        state.user.role === 'admin' && u.id !== state.user.uid ? el('button', { class: 'btn danger small', onclick: () => delUser(u) }, 'Delete') : null)))));
+    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Email'), el('th', {}, 'Role'), el('th', {}, 'Department'), el('th', {}, ''))), tbody)];
+  });
+}
+function userModal(user, departments) {
+  const isAdmin = state.user.role === 'admin';
+  const name = el('input', { value: user ? user.name : '', required: true });
+  const email = el('input', { type: 'email', value: user ? user.email : '', required: true, ...(user ? { disabled: true } : {}) });
+  const password = el('input', { type: 'password', placeholder: user ? '(managed in Firebase Auth)' : 'min 6 characters', ...(user ? { disabled: true } : {}) });
+  const role = el('select', {}, ...['employee', 'dept_head', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r }, r.replace('_', ' '))));
+  const dept = el('select', {}, el('option', { value: '' }, '— none —'), ...departments.map((d) => el('option', { value: d.id, selected: user && user.departmentId === d.id }, d.name)));
+  const content = el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Email', email),
+    user ? null : el('label', {}, 'Password', password),
+    isAdmin ? el('label', {}, 'Role', role) : null, isAdmin ? el('label', {}, 'Department', dept) : null);
+  modal(user ? 'Edit user' : 'Add user', content, async () => {
+    if (user) {
+      const patch = { name: name.value.trim() };
+      if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; }
+      await updateDoc(doc(db, 'users', user.id), patch);
+    } else {
+      if (!password.value || password.value.length < 6) throw new Error('Password must be at least 6 characters.');
+      const newRole = isAdmin ? role.value : 'employee';
+      const newDept = isAdmin ? (dept.value || null) : state.user.departmentId;
+      const uid = await createAuthUser(email.value.trim(), password.value);
+      await setDoc(doc(db, 'users', uid), { name: name.value.trim(), email: email.value.trim(), role: newRole, departmentId: newDept, createdAt: serverTimestamp() });
+    }
+    toast('User saved'); navigate(state.page);
+  });
+}
+async function delUser(u) {
+  if (!confirm(`Remove "${u.name}"? This removes their profile and access.`)) return;
+  await deleteDoc(doc(db, 'users', u.id));
+  toast('User removed');
+  infoModal('One more step', el('div', {}, el('p', {}, `${u.name}'s profile is removed, so they can no longer access any data.`),
+    el('p', { class: 'muted' }, 'Their Firebase Authentication login still exists. To fully delete it, remove the user in the Firebase console → Authentication. (Deleting Auth users requires admin privileges the browser app does not have.)')));
+  navigate(state.page);
+}
+
+/* ---- Questionnaires ---- */
+const Q_TYPES = [['text', 'Short text'], ['textarea', 'Long text'], ['number', 'Number'], ['date', 'Date'], ['select', 'Dropdown'], ['radio', 'Single choice'], ['checkbox', 'Multiple choice']];
+async function renderQuestionnaires() {
+  await withPage(async () => {
+    const list = await listQuestionnaires();
+    const head = pageHead('Questionnaires', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => questionnaireModal(null) }, '+ New questionnaire')]);
+    if (!list.length) return [head, el('div', { class: 'empty' }, 'No questionnaires yet. Create one to start collecting reports.')];
+    const counts = await Promise.all(list.map((q) => getWhere('assignments', 'questionnaireId', q.id).then((a) => a.length).catch(() => 0)));
+    const tbody = el('tbody');
+    list.forEach((q, i) => tbody.append(el('tr', {},
+      el('td', {}, q.title), el('td', {}, String((q.questions || []).length)), el('td', {}, String(counts[i])),
+      el('td', {}, el('span', { class: 'pill ' + (q.active ? 'done' : 'pending') }, q.active ? 'active' : 'inactive')),
+      el('td', {}, el('div', { class: 'row-actions' },
+        el('button', { class: 'btn ghost small', onclick: () => manageAssignments(q) }, 'Assign & codes'),
+        el('button', { class: 'btn ghost small', onclick: () => questionnaireModal(q) }, 'Edit'),
+        el('button', { class: 'btn danger small', onclick: () => delQuestionnaire(q) }, 'Delete'))))));
+    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Title'), el('th', {}, 'Questions'), el('th', {}, 'Assigned'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
+  });
+}
+function questionnaireModal(existing) {
+  const title = el('input', { value: existing ? existing.title : '', required: true });
+  const desc = el('textarea', {}, existing ? existing.description || '' : '');
+  const qWrap = el('div', {});
+  const addQ = (q = {}) => {
+    const item = el('div', { class: 'q-builder-item' });
+    const text = el('input', { placeholder: 'Question text', value: q.text || '' });
+    const type = el('select', {}, ...Q_TYPES.map(([v, l]) => el('option', { value: v, selected: q.type === v }, l)));
+    const required = el('input', { type: 'checkbox', ...(q.required ? { checked: true } : {}) });
+    const options = el('input', { placeholder: 'Options (comma separated)', value: (q.options || []).join(', ') });
+    const toggle = () => { options.style.display = ['select', 'radio', 'checkbox'].includes(type.value) ? '' : 'none'; };
+    type.addEventListener('change', toggle);
+    item.append(el('div', { class: 'q-row' }, text, el('button', { type: 'button', class: 'btn danger small', onclick: () => item.remove() }, '✕')),
+      el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required')), options);
+    toggle();
+    item._get = () => ({ text: text.value.trim(), type: type.value, required: required.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
+    qWrap.append(item);
+  };
+  ((existing && existing.questions && existing.questions.length ? existing.questions : [{}])).forEach(addQ);
+  const content = el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc), el('label', {}, 'Questions'), qWrap,
+    el('button', { type: 'button', class: 'btn', onclick: () => addQ() }, '+ Add question'));
+  modal(existing ? 'Edit questionnaire' : 'New questionnaire', content, async () => {
+    const questions = Array.from(qWrap.querySelectorAll('.q-builder-item')).map((n, i) => ({ ...n._get(), id: (existing && existing.questions && existing.questions[i] && existing.questions[i].id) || 'q' + (i + 1), position: i })).filter((q) => q.text);
+    if (!questions.length) throw new Error('Add at least one question');
+    if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), { title: title.value.trim(), description: desc.value.trim(), questions });
+    else await addDoc(colRef('questionnaires'), {
+      title: title.value.trim(), description: desc.value.trim(), questions, active: true,
+      createdBy: state.user.uid, departmentId: state.user.role === 'dept_head' ? state.user.departmentId : null, createdAt: serverTimestamp(),
+    });
+    toast('Questionnaire saved'); renderQuestionnaires();
+  }, existing ? 'Save changes' : 'Create');
+}
+async function delQuestionnaire(q) {
+  if (!confirm(`Delete "${q.title}"? Its assignments and codes are removed (past reports are kept).`)) return;
+  const assigns = await getWhere('assignments', 'questionnaireId', q.id);
+  const batch = writeBatch(db);
+  assigns.forEach((a) => { batch.delete(doc(db, 'assignments', a.id)); if (a.code) batch.delete(doc(db, 'codes', a.code)); });
+  batch.delete(doc(db, 'questionnaires', q.id));
+  await batch.commit();
+  toast('Questionnaire deleted'); renderQuestionnaires();
+}
+
+async function manageAssignments(q) {
+  const [assignments, users] = await Promise.all([getWhere('assignments', 'questionnaireId', q.id), listUsers()]);
+  const listNode = el('div', {});
+  const userSelect = el('select', {});
+  const backdrop = infoModal(`Assignments · ${q.title}`, el('div', {},
+    el('p', { class: 'muted' }, `Assign "${q.title}" to employees. Each gets a unique code to open their report.`),
+    el('div', { class: 'inline' }, userSelect, el('button', { class: 'btn primary', style: 'width:auto', onclick: doAssign }, 'Assign')),
+    el('hr'), listNode));
+
+  let current = assignments;
+  function refreshSelect() {
+    const assigned = new Set(current.map((a) => a.userId));
+    const available = users.filter((u) => !assigned.has(u.id));
+    userSelect.innerHTML = '';
+    userSelect.append(el('option', { value: '' }, available.length ? '— choose employee —' : 'Everyone is assigned'),
+      ...available.map((u) => el('option', { value: u.id }, `${u.name} (${u.email})`)));
+  }
+  function renderList() {
+    listNode.innerHTML = '';
+    if (!current.length) { listNode.append(el('p', { class: 'muted' }, 'No one assigned yet.')); return; }
+    const tbody = el('tbody');
+    current.forEach((a) => tbody.append(el('tr', {}, el('td', {}, a.userName),
+      el('td', {}, el('span', { class: 'code-chip' }, a.code)), el('td', {},
+        el('div', { class: 'row-actions' },
+          el('button', { class: 'btn ghost small', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(a.code); toast('Copied ' + a.code); } }, 'Copy'),
+          el('button', { class: 'btn ghost small', onclick: () => regen(a) }, 'New code'),
+          el('button', { class: 'btn danger small', onclick: () => unassign(a) }, 'Remove'))))));
+    listNode.append(el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Code'), el('th', {}, ''))), tbody));
+  }
+  async function reload() { current = await getWhere('assignments', 'questionnaireId', q.id); refreshSelect(); renderList(); }
+  async function doAssign() {
+    if (!userSelect.value) return;
+    const user = users.find((u) => u.id === userSelect.value);
+    const code = genCode();
+    const assignRef = doc(colRef('assignments'));
+    const batch = writeBatch(db);
+    batch.set(assignRef, { questionnaireId: q.id, userId: user.id, userName: user.name, code, departmentId: user.departmentId ?? null, active: true, createdAt: serverTimestamp() });
+    batch.set(doc(db, 'codes', code), { assignmentId: assignRef.id, questionnaireId: q.id, userId: user.id, userName: user.name, departmentId: user.departmentId ?? null, active: true });
+    batch.set(doc(colRef('notifications')), { userId: user.id, message: `New questionnaire assigned: "${q.title}" — code ${code}`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
+    await batch.commit(); toast('Assigned'); reload();
+  }
+  async function regen(a) {
+    const code = genCode();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'codes', code), { assignmentId: a.id, questionnaireId: a.questionnaireId, userId: a.userId, userName: a.userName, departmentId: a.departmentId ?? null, active: true });
+    batch.update(doc(db, 'assignments', a.id), { code });
+    if (a.code) batch.delete(doc(db, 'codes', a.code));
+    await batch.commit(); toast('New code issued'); reload();
+  }
+  async function unassign(a) {
+    if (!confirm(`Remove ${a.userName}'s assignment?`)) return;
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'assignments', a.id));
+    if (a.code) batch.delete(doc(db, 'codes', a.code));
+    await batch.commit(); toast('Removed'); reload();
+  }
+  refreshSelect(); renderList();
+  void backdrop;
+}
+
+/* ---- Reports ---- */
+async function renderReports() {
+  await withPage(async () => {
+    const reports = await listReports();
+    const isEmployee = state.user.role === 'employee';
+    const actions = isEmployee ? [] : [el('button', { class: 'btn', style: 'width:auto', onclick: () => exportCsv(reports) }, '⭳ Export CSV')];
+    const head = pageHead(isEmployee ? 'My Reports' : 'Reports', actions);
+    if (!reports.length) return [head, el('div', { class: 'empty' }, isEmployee ? 'You have not submitted any reports yet.' : 'No reports submitted yet.')];
+    return [head, reportsTable(reports)];
+  });
+}
+function reportsTable(reports) {
+  if (!reports.length) return el('div', { class: 'empty' }, 'No reports yet.');
+  const tbody = el('tbody');
+  reports.forEach((r) => tbody.append(el('tr', {}, el('td', {}, fmtDate(r.submittedAt)), el('td', {}, r.userName),
+    el('td', {}, r.questionnaireTitle), el('td', {}, String((r.answers || []).length)),
+    el('td', {}, el('button', { class: 'btn ghost small', onclick: () => viewReport(r) }, 'View')))));
+  return el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Submitted'), el('th', {}, 'Employee'), el('th', {}, 'Questionnaire'), el('th', {}, 'Answers'), el('th', {}, ''))), tbody);
+}
+function viewReport(r) {
+  infoModal(r.questionnaireTitle, el('div', {}, el('p', { class: 'muted' }, `${r.userName} · ${fmtDate(r.submittedAt)}`),
+    ...(r.answers || []).map((a) => el('div', { class: 'report-answer' }, el('div', { class: 'q' }, a.question), el('div', { class: 'a' }, a.value || '—')))));
+}
+function exportCsv(reports) {
+  const header = ['submitted_at', 'employee', 'questionnaire', 'question', 'answer'];
+  const cell = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [header.join(',')];
+  reports.forEach((r) => (r.answers || []).forEach((a) => lines.push([fmtDate(r.submittedAt), r.userName, r.questionnaireTitle, a.question, a.value].map(cell).join(','))));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const link = el('a', { href: url, download: 'daily-reports.csv' });
+  document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
+/* ---- Tasks ---- */
+async function renderTasks() {
+  await withPage(async () => {
+    const canAssign = state.user.role === 'admin' || state.user.role === 'dept_head';
+    const [tasks, users] = await Promise.all([listTasks(), canAssign ? listUsers() : Promise.resolve([])]);
+    const isEmployee = state.user.role === 'employee';
+    const actions = canAssign ? [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => taskModal(users) }, '+ Assign task')] : [];
+    const head = pageHead(isEmployee ? 'My Tasks' : 'Tasks', actions);
+    if (!tasks.length) return [head, el('div', { class: 'empty' }, 'No tasks.')];
+    const tbody = el('tbody');
+    tasks.forEach((t) => {
+      const sel = el('select', { onchange: async (e) => { await updateDoc(doc(db, 'tasks', t.id), { status: e.target.value }); if (e.target.value === 'done' && t.assignedBy && t.assignedBy !== state.user.uid) await addDoc(colRef('notifications'), { userId: t.assignedBy, message: `Task completed: "${t.title}"`, type: 'task', relatedId: t.id, isRead: false, createdAt: serverTimestamp() }); toast('Task updated'); renderTasks(); } },
+        ...['pending', 'in_progress', 'done'].map((s) => el('option', { value: s, selected: t.status === s }, s.replace('_', ' '))));
+      tbody.append(el('tr', {}, el('td', {}, el('div', {}, el('strong', {}, t.title), t.description ? el('div', { class: 'muted' }, t.description) : null)),
+        el('td', {}, t.assignedToName || ''), el('td', {}, t.dueDate || '—'), el('td', {}, sel),
+        el('td', {}, canAssign ? el('button', { class: 'btn danger small', onclick: () => delTask(t) }, 'Delete') : null)));
+    });
+    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Assignee'), el('th', {}, 'Due'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
+  });
+}
+function taskModal(users) {
+  const title = el('input', { required: true });
+  const desc = el('textarea', {});
+  const assignee = el('select', { required: true }, el('option', { value: '' }, '— choose —'), ...users.filter((u) => u.id !== state.user.uid).map((u) => el('option', { value: u.id }, `${u.name} (${u.email})`)));
+  const due = el('input', { type: 'date' });
+  modal('Assign task', el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc), el('label', {}, 'Assign to', assignee), el('label', {}, 'Due date', due)), async () => {
+    if (!assignee.value) throw new Error('Choose an assignee');
+    const u = users.find((x) => x.id === assignee.value);
+    const taskRef = doc(colRef('tasks'));
+    const batch = writeBatch(db);
+    batch.set(taskRef, { title: title.value.trim(), description: desc.value.trim(), assignedTo: u.id, assignedToName: u.name, assignedBy: state.user.uid, departmentId: u.departmentId ?? null, dueDate: due.value || null, status: 'pending', createdAt: serverTimestamp() });
+    batch.set(doc(colRef('notifications')), { userId: u.id, message: `New task assigned: "${title.value.trim()}"`, type: 'task', relatedId: taskRef.id, isRead: false, createdAt: serverTimestamp() });
+    await batch.commit(); toast('Task assigned'); renderTasks();
+  }, 'Assign');
+}
+async function delTask(t) {
+  if (!confirm(`Delete task "${t.title}"?`)) return;
+  await deleteDoc(doc(db, 'tasks', t.id));
+  toast('Task deleted'); renderTasks();
+}
+
+/* ------------------------------------------------------------------ */
+boot();

@@ -6,3 +6,10 @@ data/
 .env
 npm-debug.log*
 .DS_Store
+
+# Firebase
+.firebase/
+*-debug.log
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
