@@ -1,0 +1,26 @@
+{
+  "name": "daily-reporting",
+  "version": "1.0.0",
+  "description": "Daily employee reporting platform with questionnaires, unique-code reporting, tasks and role-based access.",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node server/seed.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "reporting",
+    "questionnaire",
+    "employee",
+    "tasks"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
