@@ -180,10 +180,23 @@ Because there's no server seed, create the very first admin by hand:
    - `name` (string) — e.g. "Administrator"
    - `email` (string) — the same email
    - `role` (string) — `admin`
+   - `authUid` (string) — the same UID
    - `departmentId` (string, or leave null)
 3. Open the site, click **Staff / admin login**, and sign in. From there the
-   admin creates departments, users (their Auth accounts are created for them),
-   questionnaires, assignments, and tasks — no more console work needed.
+   admin creates departments, users, questionnaires, assignments, and tasks —
+   no more console work needed.
+
+### How users and reporting work
+
+- **Adding a user** captures a **Name** and a **Unique ID** (you choose it, e.g.
+  `EMP001`), plus an optional Department and Role. A **login (email + password)
+  is optional** — fill it only for people who need the dashboard (admins and
+  department heads require one; reporters usually don't).
+- **Reporting needs only the Unique ID.** An employee opens the site, types their
+  Unique ID, sees the questionnaire(s) assigned to them, and submits — no login.
+- **Assigning** a questionnaire to someone just links it to them; their single
+  Unique ID covers every questionnaire they're assigned.
+- Anyone you gave a login to can also sign in to see their own past reports.
 
 ### Automated deploy from GitHub (no command line)
 
