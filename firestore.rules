@@ -43,6 +43,13 @@ service cloud.firestore {
       return isAdmin() ||
         (isDeptHead() && data.keys().hasAny(['deptPath']) && (myDept() in data.deptPath));
     }
+    // Admin, or a head STRICTLY above the record's department (a superior) —
+    // used for approving another department's questionnaire changes.
+    function strictSuperior(data) {
+      return isAdmin() ||
+        (isDeptHead() && data.keys().hasAny(['deptPath']) &&
+          (myDept() in data.deptPath) && myDept() != data.departmentId);
+    }
 
     // ---- users ----
     match /users/{uid} {
@@ -70,14 +77,32 @@ service cloud.firestore {
     }
 
     // ---- questionnaires ----
+    // Creation is scoped (a head can create in their subtree). Editing/deleting
+    // an existing questionnaire directly is limited to an admin or a STRICT
+    // superior of the questionnaire's department — the owning department's head
+    // must instead file an approval request (see /approvals).
     match /questionnaires/{id} {
       allow get: if true;
       allow list: if scoped(resource.data);
       allow create: if isManager() &&
         request.resource.data.createdBy == request.auth.uid &&
         scoped(request.resource.data);
-      allow update, delete: if scoped(resource.data) ||
-        (isSignedIn() && resource.data.createdBy == request.auth.uid);
+      allow update, delete: if strictSuperior(resource.data);
+    }
+
+    // ---- approvals ----  (questionnaire change requests awaiting a superior)
+    match /approvals/{id} {
+      allow read: if scoped(resource.data);
+      allow create: if isDeptHead() &&
+        request.resource.data.requestedBy == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        scoped(request.resource.data);
+      // Only a superior (or admin) may resolve a still-pending request, and only
+      // by setting the resolution fields.
+      allow update: if resource.data.status == 'pending' &&
+        changedKeys().hasOnly(['status', 'resolvedBy', 'resolvedAt']) &&
+        strictSuperior(resource.data);
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.requestedBy == request.auth.uid);
     }
 
     // ---- codes ----  (doc id == the user's unique reporting id)

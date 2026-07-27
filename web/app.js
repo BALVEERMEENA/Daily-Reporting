@@ -409,11 +409,11 @@ function fieldFor(q) {
  * Authenticated app shell
  * ------------------------------------------------------------------ */
 const PAGES = {
-  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'pendency', 'schedule'],
-  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'pendency', 'schedule'],
+  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
+  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
   employee: ['tasks', 'reports', 'schedule'],
 };
-const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', pendency: 'Pendency', schedule: 'My Schedule' };
+const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', pendency: 'Pendency', approvals: 'Approvals', schedule: 'My Schedule' };
 
 function enterApp() {
   root().innerHTML = '';
@@ -443,7 +443,7 @@ const ROUTES = {
   dashboard: renderDashboard, departments: renderDepartments,
   users: () => renderUsers(false), team: () => renderUsers(true),
   questionnaires: renderQuestionnaires, reports: renderReports, tasks: renderTasks,
-  pendency: renderPendency, schedule: renderSchedule,
+  pendency: renderPendency, approvals: renderApprovals, schedule: renderSchedule,
 };
 function navigate(page) {
   state.page = page;
@@ -721,6 +721,74 @@ async function delUser(u) {
 
 /* ---- Questionnaires ---- */
 const Q_TYPES = [['text', 'Short text'], ['textarea', 'Long text'], ['number', 'Number'], ['date', 'Date'], ['select', 'Dropdown'], ['radio', 'Single choice'], ['checkbox', 'Multiple choice']];
+
+// Can the current user edit/delete this questionnaire directly (admin or a
+// strict superior of its department)? Otherwise changes go through approval.
+function canDirectEditQ(q) {
+  if (state.user.role === 'admin') return true;
+  if (state.user.role === 'dept_head') {
+    const dp = q.deptPath || [];
+    return dp.includes(state.user.departmentId) && state.user.departmentId !== q.departmentId;
+  }
+  return false;
+}
+async function requestQuestionnaireChange(type, q, proposed) {
+  await addDoc(colRef('approvals'), {
+    type, questionnaireId: q.id, questionnaireTitle: q.title,
+    departmentId: q.departmentId ?? null, deptPath: q.deptPath || [],
+    requestedBy: state.user.uid, requestedByName: state.user.name,
+    proposed: proposed || null, status: 'pending', createdAt: serverTimestamp(),
+  });
+  toast('Submitted for approval');
+}
+async function resolveApproval(a, approve) {
+  const batch = writeBatch(db);
+  if (approve && a.type === 'update' && a.proposed) {
+    batch.update(doc(db, 'questionnaires', a.questionnaireId), a.proposed);
+  } else if (approve && a.type === 'delete') {
+    const [assigns, users] = await Promise.all([getWhere('assignments', 'questionnaireId', a.questionnaireId).catch(() => []), listUsers().catch(() => [])]);
+    const uidById = Object.fromEntries(users.map((u) => [u.id, u.uniqueId]));
+    assigns.forEach((x) => {
+      batch.delete(doc(db, 'assignments', x.id));
+      const code = uidById[x.userId];
+      if (code) batch.update(doc(db, 'codes', code), { questionnaires: arrayRemove({ assignmentId: x.id, questionnaireId: a.questionnaireId, title: a.questionnaireTitle }) });
+    });
+    batch.delete(doc(db, 'questionnaires', a.questionnaireId));
+  }
+  batch.update(doc(db, 'approvals', a.id), { status: approve ? 'approved' : 'rejected', resolvedBy: state.user.uid, resolvedAt: serverTimestamp() });
+  await batch.commit();
+  addDoc(colRef('notifications'), { userId: a.requestedBy, message: `Your questionnaire ${a.type} for "${a.questionnaireTitle}" was ${approve ? 'approved' : 'rejected'}.`, type: 'approval', relatedId: a.questionnaireId, isRead: false, createdAt: serverTimestamp() }).catch(() => {});
+  toast(approve ? 'Approved' : 'Rejected');
+}
+
+async function listApprovals() {
+  const rows = state.user.role === 'admin' ? await getAll('approvals') : await getSubtree('approvals');
+  return rows.sort(byCreatedDesc);
+}
+async function renderApprovals() {
+  await withPage(async () => {
+    const rows = await listApprovals();
+    const canApprove = (a) => a.status === 'pending' && (state.user.role === 'admin' || (a.departmentId !== state.user.departmentId && (a.deptPath || []).includes(state.user.departmentId)));
+    const toApprove = rows.filter(canApprove);
+    const mine = rows.filter((a) => a.requestedBy === state.user.uid);
+    const head = pageHead('Approvals');
+    const out = [head];
+    out.push(el('h3', {}, 'Pending your approval'));
+    if (!toApprove.length) out.push(el('p', { class: 'muted' }, 'Nothing waiting on you.'));
+    else toApprove.forEach((a) => out.push(el('div', { class: 'q-builder-item' },
+      el('div', {}, el('strong', {}, `${a.type} · ${a.questionnaireTitle}`),
+        el('div', { class: 'muted', style: 'font-size:12px' }, `requested by ${a.requestedByName || '—'} · ${fmtDate(a.createdAt)}`)),
+      el('div', { class: 'inline', style: 'margin-top:8px' },
+        el('button', { class: 'btn primary', style: 'width:auto', onclick: async () => { try { await resolveApproval(a, true); renderApprovals(); } catch (e) { toast(friendlyError(e), true); } } }, 'Approve'),
+        el('button', { class: 'btn danger', style: 'width:auto', onclick: async () => { try { await resolveApproval(a, false); renderApprovals(); } catch (e) { toast(friendlyError(e), true); } } }, 'Reject')))));
+    out.push(el('h3', { style: 'margin-top:24px' }, 'My requests'));
+    if (!mine.length) out.push(el('p', { class: 'muted' }, 'You have not submitted any.'));
+    else mine.forEach((a) => out.push(el('div', { class: 'q-builder-item' },
+      el('strong', {}, `${a.type} · ${a.questionnaireTitle}`),
+      el('span', { class: 'pill ' + (a.status === 'approved' ? 'done' : a.status === 'rejected' ? 'pending' : 'in_progress'), style: 'margin-left:8px' }, a.status))));
+    return out;
+  });
+}
 async function renderQuestionnaires() {
   await withPage(async () => {
     const list = await listQuestionnaires();
@@ -771,20 +839,26 @@ async function questionnaireModal(existing) {
     el('div', { class: 'inline' },
       el('button', { type: 'button', class: 'btn', onclick: () => addQ({}, { atTop: true }) }, '+ Add at top'),
       el('button', { type: 'button', class: 'btn', onclick: () => addQ() }, '+ Add at end')));
+  const needsApproval = existing && !canDirectEditQ(existing);
+  const submitLabel = needsApproval ? 'Submit for approval' : (existing ? 'Save changes' : 'Create');
   modal(existing ? 'Edit questionnaire' : 'New questionnaire', content, async () => {
     const questions = Array.from(qWrap.querySelectorAll('.q-builder-item')).map((n, i) => ({ ...n._get(), position: i })).filter((q) => q.text);
     if (!questions.length) throw new Error('Add at least one question');
-    const departmentId = isAdmin ? (deptSel.value || null) : state.user.departmentId;
+    const departmentId = isAdmin ? (deptSel.value || null) : (existing ? existing.departmentId ?? null : state.user.departmentId);
     const deptPath = deptPathOf(departmentId, departments);
-    if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), { title: title.value.trim(), description: desc.value.trim(), questions, departmentId, deptPath });
-    else await addDoc(colRef('questionnaires'), {
-      title: title.value.trim(), description: desc.value.trim(), questions, active: true,
-      createdBy: state.user.uid, departmentId, deptPath, createdAt: serverTimestamp(),
-    });
+    const payload = { title: title.value.trim(), description: desc.value.trim(), questions, departmentId, deptPath };
+    if (needsApproval) { await requestQuestionnaireChange('update', existing, payload); renderQuestionnaires(); return; }
+    if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), payload);
+    else await addDoc(colRef('questionnaires'), { ...payload, active: true, createdBy: state.user.uid, createdAt: serverTimestamp() });
     toast('Questionnaire saved'); renderQuestionnaires();
-  }, existing ? 'Save changes' : 'Create');
+  }, submitLabel);
 }
 async function delQuestionnaire(q) {
+  if (!canDirectEditQ(q)) {
+    if (!confirm(`Request deletion of "${q.title}"? A superior department must approve it.`)) return;
+    try { await requestQuestionnaireChange('delete', q); } catch (e) { toast(friendlyError(e), true); }
+    return;
+  }
   if (!confirm(`Delete "${q.title}"? Its assignments are removed (past reports are kept).`)) return;
   const [assigns, users] = await Promise.all([getWhere('assignments', 'questionnaireId', q.id), listUsers().catch(() => [])]);
   const uidById = Object.fromEntries(users.map((u) => [u.id, u.uniqueId]));
