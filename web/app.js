@@ -228,7 +228,10 @@ function renderPublic() {
     el('h1', {}, 'Daily Reporting'),
     el('p', { class: 'muted' }, 'Enter your Unique ID to open your report.'),
     form, errBox, container,
-    el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →')));
+    el('p', { class: 'switch' },
+      el('a', { href: '#', onclick: (e) => { e.preventDefault(); location.reload(); } }, '↻ Refresh'),
+      el('span', {}, '   ·   '),
+      el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →')));
   root().append(centered(card));
 }
 
@@ -413,6 +416,7 @@ function enterApp() {
     el('header', { class: 'topbar' },
       el('div', { class: 'brand' }, 'Daily Reporting'), nav,
       el('div', { class: 'topbar-right' }, bell,
+        el('button', { class: 'btn ghost small', title: 'Refresh', onclick: () => location.reload() }, '↻'),
         el('span', { class: 'user-label' }, `${state.user.name} · ${state.user.role.replace('_', ' ')}`),
         el('button', { class: 'btn ghost small', onclick: () => signOut(auth) }, 'Logout'))),
     el('div', { id: 'notif-panel', class: 'notif-panel hidden' }), el('main', { id: 'page', class: 'page' }));
