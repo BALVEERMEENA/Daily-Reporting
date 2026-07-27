@@ -1,0 +1,44 @@
+# Fly.io configuration for Daily Reporting.
+#
+# `app` must be globally unique across Fly. If "daily-reporting" is taken,
+# change it here (and use the same name in the deploy commands below).
+# `primary_region` is set to Mumbai (bom) — change it to a region near you:
+#   https://fly.io/docs/reference/regions/
+app = "daily-reporting"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  DATA_DIR = "/app/data"
+
+# Persistent volume that holds the SQLite database file. Data survives
+# restarts and deploys. Create it once with:
+#   fly volumes create data --region bom --size 1
+[mounts]
+  source = "data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Scale to zero when idle to stay within the free allowance. The next
+  # request cold-starts the machine (a few seconds). Set min_machines_running
+  # to 1 if you want it always warm.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

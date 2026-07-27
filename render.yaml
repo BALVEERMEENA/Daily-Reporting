@@ -1,0 +1,33 @@
+# Render Blueprint — deploy this app with one click.
+# In Render: New + → Blueprint → connect this repo. Render reads this file.
+#
+# NOTE: The persistent disk below keeps the SQLite database between deploys and
+# restarts. Persistent disks require a paid instance type on Render (the free
+# tier has an ephemeral filesystem and would lose data on restart). Adjust
+# `plan` to your needs.
+services:
+  - type: web
+    name: daily-reporting
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      # A strong signing secret is generated for you on first deploy.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      # Point the app at the mounted persistent disk.
+      - key: DATA_DIR
+        value: /var/data
+      # Change these after the first login, or set them here before deploying.
+      - key: ADMIN_EMAIL
+        value: admin@example.com
+      - key: ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1

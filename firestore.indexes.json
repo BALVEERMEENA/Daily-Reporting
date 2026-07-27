@@ -1,0 +1,5 @@
+{
+  "comment": "Queries in the app use single-field equality filters only and sort on the client, so no composite indexes are required. This file is here for firebase deploy and future additions.",
+  "indexes": [],
+  "fieldOverrides": []
+}
