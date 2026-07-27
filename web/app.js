@@ -90,6 +90,32 @@ async function getWhere(name, field, value) {
 const byCreatedDesc = (a, b) => millis(b.createdAt) - millis(a.createdAt);
 const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''));
 
+/* ---- department hierarchy helpers ---- */
+// Compute each department's ancestor path (root-first, including itself) from
+// the parentId graph. Returns { deptId: [ancestorIds..., self] }.
+function computePaths(depts) {
+  const byId = Object.fromEntries(depts.map((d) => [d.id, d]));
+  const pathOf = (id, seen) => {
+    if (!id || seen.has(id)) return [];
+    seen.add(id);
+    const d = byId[id];
+    if (!d) return [];
+    return d.parentId ? [...pathOf(d.parentId, seen), id] : [id];
+  };
+  const res = {};
+  for (const d of depts) res[d.id] = pathOf(d.id, new Set());
+  return res;
+}
+// The stored path for a department (falls back to computing from the list).
+function deptPathOf(deptId, depts) {
+  if (!deptId) return [];
+  const d = (depts || []).find((x) => x.id === deptId);
+  if (d && Array.isArray(d.path) && d.path.length) return d.path;
+  return computePaths(depts || [])[deptId] || [deptId];
+}
+function deptDepth(d) { return (Array.isArray(d.path) ? d.path.length : 1) - 1; }
+function deptName(depts, id) { return (depts.find((d) => d.id === id) || {}).name || '—'; }
+
 async function listUsers() {
   const rows = state.user.role === 'admin'
     ? await getAll('users')
@@ -495,37 +521,73 @@ function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t)
 async function renderDepartments() {
   await withPage(async () => {
     const [departments, users] = await Promise.all([listDepartments(), listUsers()]);
-    const head = pageHead('Departments', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => departmentModal(null, users) }, '+ New department')]);
-    if (!departments.length) return [head, el('div', { class: 'empty' }, 'No departments yet.')];
+    // order as a tree: sort by path so ancestors precede descendants
+    const paths = computePaths(departments);
+    const ordered = departments.slice().sort((a, b) =>
+      (paths[a.id] || []).map((id) => deptName(departments, id)).join('/').localeCompare(
+        (paths[b.id] || []).map((id) => deptName(departments, id)).join('/')));
+    const head = pageHead('Departments', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => departmentModal(null, users, departments) }, '+ New department')]);
+    if (!departments.length) return [head, el('div', { class: 'empty' }, 'No departments yet. The first one is your top-level branch.')];
     const tbody = el('tbody');
-    departments.forEach((d) => {
+    ordered.forEach((d) => {
+      const depth = (paths[d.id] || [d.id]).length - 1;
       const memberCount = users.filter((u) => u.departmentId === d.id).length;
       const headName = (users.find((u) => u.id === d.headUserId) || {}).name || '—';
-      tbody.append(el('tr', {}, el('td', {}, d.name), el('td', {}, headName), el('td', {}, String(memberCount)),
+      const label = (depth ? '—'.repeat(depth) + ' ' : '') + d.name;
+      tbody.append(el('tr', {},
+        el('td', {}, el('span', depth ? { class: 'muted' } : {}, label), depth ? null : el('span', { class: 'pill dept_head', style: 'margin-left:8px' }, 'branch')),
+        el('td', {}, headName), el('td', {}, String(memberCount)),
         el('td', {}, el('div', { class: 'row-actions' },
-          el('button', { class: 'btn ghost small', onclick: () => departmentModal(d, users) }, 'Edit'),
-          el('button', { class: 'btn danger small', onclick: () => delDepartment(d, users) }, 'Delete')))));
+          el('button', { class: 'btn ghost small', onclick: () => departmentModal(d, users, departments) }, 'Edit'),
+          el('button', { class: 'btn danger small', onclick: () => delDepartment(d, users, departments) }, 'Delete')))));
     });
-    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Head'), el('th', {}, 'Members'), el('th', {}, ''))), tbody)];
+    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Department'), el('th', {}, 'Head'), el('th', {}, 'Members'), el('th', {}, ''))), tbody)];
   });
 }
-function departmentModal(dept, users) {
+
+function departmentModal(dept, users, departments) {
   const name = el('input', { value: dept ? dept.name : '', required: true });
+  // a department cannot be its own parent or a child of its own descendants
+  const paths = computePaths(departments);
+  const descendantIds = dept ? new Set(departments.filter((x) => (paths[x.id] || []).includes(dept.id)).map((x) => x.id)) : new Set();
+  const parentOptions = departments.filter((x) => !descendantIds.has(x.id));
+  const parent = el('select', {}, el('option', { value: '' }, '— none (top-level branch) —'),
+    ...parentOptions.map((p) => el('option', { value: p.id, selected: dept && dept.parentId === p.id }, p.name)));
   const head = el('select', {}, el('option', { value: '' }, '— none —'),
     ...users.filter((u) => u.authUid).map((u) => el('option', { value: u.id, selected: dept && dept.headUserId === u.id }, `${u.name} (${u.email || u.uniqueId})`)));
   modal(dept ? 'Edit department' : 'New department',
-    el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Department head (must have a login)', head)), async () => {
+    el('div', {},
+      el('label', {}, 'Name', name),
+      el('label', {}, 'Parent department', parent),
+      el('label', {}, 'Department head (must have a login)', head)), async () => {
       const headId = head.value || null;
-      if (dept) await updateDoc(doc(db, 'departments', dept.id), { name: name.value.trim(), headUserId: headId });
-      else { const ref = await addDoc(colRef('departments'), { name: name.value.trim(), headUserId: headId, createdAt: serverTimestamp() }); dept = { id: ref.id }; }
-      if (headId) await updateDoc(doc(db, 'users', headId), { role: 'dept_head', departmentId: dept.id });
+      const parentId = parent.value || null;
+      const ref = dept ? doc(db, 'departments', dept.id) : doc(colRef('departments'));
+      const id = dept ? dept.id : ref.id;
+      // rebuild the whole tree's paths with this department's new parent
+      const working = departments.filter((x) => x.id !== id).concat([{ id, parentId }]);
+      const newPaths = computePaths(working);
+      const batch = writeBatch(db);
+      if (dept) batch.update(ref, { name: name.value.trim(), parentId, path: newPaths[id] });
+      else batch.set(ref, { name: name.value.trim(), parentId, path: newPaths[id], headUserId: headId, createdAt: serverTimestamp() });
+      // update descendants whose path changed
+      departments.forEach((x) => {
+        if (x.id === id) return;
+        const np = newPaths[x.id] || [];
+        if (JSON.stringify(np) !== JSON.stringify(x.path || [])) batch.update(doc(db, 'departments', x.id), { path: np });
+      });
+      if (headId) batch.update(doc(db, 'users', headId), { role: 'dept_head', departmentId: id, deptPath: newPaths[id] });
+      await batch.commit();
       toast('Department saved'); renderDepartments();
     });
 }
-async function delDepartment(d, users) {
+
+async function delDepartment(d, users, departments) {
+  const children = departments.filter((x) => x.parentId === d.id);
+  if (children.length) { toast('Move or delete its sub-departments first.', true); return; }
   if (!confirm(`Delete department "${d.name}"? Members will be unassigned.`)) return;
   const batch = writeBatch(db);
-  users.filter((u) => u.departmentId === d.id).forEach((u) => batch.update(doc(db, 'users', u.id), { departmentId: null }));
+  users.filter((u) => u.departmentId === d.id).forEach((u) => batch.update(doc(db, 'users', u.id), { departmentId: null, deptPath: [] }));
   batch.delete(doc(db, 'departments', d.id));
   await batch.commit();
   toast('Department deleted'); renderDepartments();
@@ -580,12 +642,12 @@ function userModal(user, departments) {
   modal(editing ? 'Edit user' : 'Add user', content, async () => {
     if (editing) {
       const patch = { name: name.value.trim() };
-      if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; }
+      if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; patch.deptPath = deptPathOf(dept.value || null, departments); }
       await updateDoc(doc(db, 'users', user.id), patch);
       // keep the reporting-code doc's name/department in sync
       if (user.uniqueId) {
         const codePatch = { name: name.value.trim() };
-        if (isAdmin) codePatch.departmentId = dept.value || null;
+        if (isAdmin) { codePatch.departmentId = dept.value || null; codePatch.deptPath = deptPathOf(dept.value || null, departments); }
         await updateDoc(doc(db, 'codes', user.uniqueId), codePatch).catch(() => {});
       }
       toast('User saved'); navigate(state.page); return;
@@ -608,13 +670,14 @@ function userModal(user, departments) {
     if (wantsLogin) { authUid = await createAuthUser(email.value.trim(), password.value); docId = authUid; }
     else { docId = doc(colRef('users')).id; }
 
+    const newDeptPath = deptPathOf(newDept, departments);
     const batch = writeBatch(db);
     batch.set(doc(db, 'users', docId), {
-      name: name.value.trim(), uniqueId: uid, role: newRole, departmentId: newDept,
+      name: name.value.trim(), uniqueId: uid, role: newRole, departmentId: newDept, deptPath: newDeptPath,
       authUid, email: wantsLogin ? email.value.trim() : null, createdAt: serverTimestamp(),
     });
     batch.set(doc(db, 'codes', uid), {
-      userId: docId, name: name.value.trim(), departmentId: newDept, questionnaires: [], tasks: [], active: true,
+      userId: docId, name: name.value.trim(), departmentId: newDept, deptPath: newDeptPath, questionnaires: [], tasks: [], active: true,
     });
     await batch.commit();
     toast('User added'); navigate(state.page);
