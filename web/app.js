@@ -576,7 +576,12 @@ function departmentModal(dept, users, departments) {
         const np = newPaths[x.id] || [];
         if (JSON.stringify(np) !== JSON.stringify(x.path || [])) batch.update(doc(db, 'departments', x.id), { path: np });
       });
-      if (headId) batch.update(doc(db, 'users', headId), { role: 'dept_head', departmentId: id, deptPath: newPaths[id] });
+      if (headId) {
+        const headUser = users.find((u) => u.id === headId);
+        // promote an employee to dept_head, but never demote an existing admin
+        const headRole = headUser && headUser.role === 'admin' ? 'admin' : 'dept_head';
+        batch.update(doc(db, 'users', headId), { role: headRole, departmentId: id, deptPath: newPaths[id] });
+      }
       await batch.commit();
       toast('Department saved'); renderDepartments();
     });
