@@ -226,20 +226,63 @@ function renderLogin() {
     el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderPublic(); } }, '← Report with your ID')))));
 }
 
-/** After a valid Unique ID, show the assigned questionnaire(s). */
-function openReporter(uniqueId, codeData, container) {
+/** After a valid Unique ID, show the assigned questionnaire(s) and tasks. */
+async function openReporter(uniqueId, codeData, container) {
   container.innerHTML = '';
-  const list = (codeData.questionnaires || []);
   container.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)));
-  if (!list.length) {
-    container.append(el('p', { class: 'muted' }, 'No questionnaire has been assigned to you yet. Please check with your manager.'));
-    return;
+  const qWrap = el('div', {});
+  const tWrap = el('div', {});
+  container.append(qWrap, tWrap);
+  renderReporterQuestionnaires(uniqueId, codeData, qWrap);
+  const taskCount = await renderReporterTasks(uniqueId, codeData, tWrap);
+  if (!(codeData.questionnaires || []).length && !taskCount) {
+    container.append(el('p', { class: 'muted' }, 'Nothing has been assigned to you yet. Please check with your manager.'));
   }
-  if (list.length === 1) return loadReportForm(uniqueId, codeData, list[0], container);
-  container.append(el('p', { class: 'muted' }, 'Choose a report to fill in:'));
-  list.forEach((entry) => container.append(
+}
+
+function renderReporterQuestionnaires(uniqueId, codeData, wrap) {
+  const list = codeData.questionnaires || [];
+  if (!list.length) return;
+  wrap.append(el('h3', {}, 'Your report'));
+  if (list.length === 1) { const d = el('div', {}); wrap.append(d); loadReportForm(uniqueId, codeData, list[0], d); return; }
+  wrap.append(el('p', { class: 'muted' }, 'Choose a report to fill in:'));
+  const forms = el('div', {});
+  list.forEach((entry) => wrap.append(
     el('button', { class: 'btn', style: 'width:100%;justify-content:flex-start;margin-bottom:8px',
-      onclick: () => loadReportForm(uniqueId, codeData, entry, container) }, entry.title || 'Report')));
+      onclick: () => loadReportForm(uniqueId, codeData, entry, forms) }, entry.title || 'Report')));
+  wrap.append(forms);
+}
+
+/** Load the person's open tasks (by id from their code doc) and show update
+ *  controls. Returns the number of open tasks shown. */
+async function renderReporterTasks(uniqueId, codeData, wrap) {
+  const ids = codeData.tasks || [];
+  if (!ids.length) return 0;
+  const tasks = [];
+  for (const id of ids) {
+    try {
+      const s = await getDoc(doc(db, 'tasks', id));
+      if (s.exists() && s.data().status !== 'closed') tasks.push({ id: s.id, ...s.data() });
+    } catch { /* ignore */ }
+  }
+  if (!tasks.length) return 0;
+  wrap.append(el('hr'), el('h3', {}, 'Your tasks'));
+  tasks.forEach((task) => {
+    const card = el('div', { class: 'q-builder-item' });
+    const rebuild = () => {
+      card.innerHTML = '';
+      card.append(
+        el('strong', {}, task.title),
+        task.description ? el('div', { class: 'muted' }, task.description) : null,
+        el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, taskMeta(task)),
+        task.status === 'closed'
+          ? el('span', { class: 'pill done' }, 'closed')
+          : taskUpdateControls(task, { uniqueId }, rebuild));
+    };
+    rebuild();
+    wrap.append(card);
+  });
+  return tasks.length;
 }
 
 async function loadReportForm(uniqueId, codeData, entry, container) {
@@ -571,7 +614,7 @@ function userModal(user, departments) {
       authUid, email: wantsLogin ? email.value.trim() : null, createdAt: serverTimestamp(),
     });
     batch.set(doc(db, 'codes', uid), {
-      userId: docId, name: name.value.trim(), departmentId: newDept, questionnaires: [], active: true,
+      userId: docId, name: name.value.trim(), departmentId: newDept, questionnaires: [], tasks: [], active: true,
     });
     await batch.commit();
     toast('User added'); navigate(state.page);
@@ -748,6 +791,90 @@ function exportCsv(reports) {
 }
 
 /* ---- Tasks ---- */
+function addDays(n) { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+
+function taskMeta(t) {
+  const parts = [t.type === 'pendency' ? 'quantity' : 'one-time'];
+  if (t.dueDate) parts.push('due ' + t.dueDate);
+  else if (t.horizonDays) parts.push(t.horizonDays + '-day');
+  if (t.type === 'onetime' && t.oneTimeStatus === 'completed' && t.completedDate) parts.push('completed ' + t.completedDate);
+  if (t.type === 'onetime' && t.oneTimeStatus !== 'completed' && t.pendingReason) parts.push('reason: ' + t.pendingReason);
+  return parts.join(' • ');
+}
+
+/** Build the inline update controls for a task. Shared by the reporting flow
+ *  (unauthenticated, ctx.uniqueId = entered code) and the dashboard. */
+function taskUpdateControls(task, ctx, onDone) {
+  const wrap = el('div', {});
+  const err = el('div', { class: 'error' });
+  if (task.type === 'pendency') {
+    const completed = el('input', { type: 'number', min: '0', step: '1', value: '0' });
+    const added = el('input', { type: 'number', min: '0', step: '1', value: '0' });
+    const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
+    btn.addEventListener('click', async () => {
+      err.textContent = '';
+      const c = Math.max(0, parseInt(completed.value || '0', 10) || 0);
+      const a = Math.max(0, parseInt(added.value || '0', 10) || 0);
+      btn.disabled = true;
+      try { await commitTaskUpdate(task, ctx, { completed: c, added: a }); onDone && onDone(); }
+      catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
+    });
+    wrap.append(
+      el('p', {}, 'Currently pending: ', el('strong', {}, String(task.pendency ?? 0))),
+      el('div', { class: 'inline' },
+        el('label', { style: 'flex:1' }, 'Completed today', completed),
+        el('label', { style: 'flex:1' }, 'Newly added', added)),
+      btn, err);
+  } else {
+    const grp = 'ot' + task.id;
+    const doneR = el('input', { type: 'radio', name: grp, value: 'completed' });
+    const pendR = el('input', { type: 'radio', name: grp, value: 'pending', checked: true });
+    const reason = el('textarea', { placeholder: 'Reason for still pending' });
+    const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
+    btn.addEventListener('click', async () => {
+      err.textContent = '';
+      const completed = doneR.checked;
+      if (!completed && !reason.value.trim()) { err.textContent = 'Please give a reason for pending.'; return; }
+      btn.disabled = true;
+      try { await commitTaskUpdate(task, ctx, { completed, reason: reason.value.trim() }); onDone && onDone(); }
+      catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
+    });
+    wrap.append(
+      el('div', { class: 'checkbox-list' }, el('label', {}, doneR, ' Completed'), el('label', {}, pendR, ' Still pending')),
+      el('label', {}, 'If pending, reason', reason), btn, err);
+  }
+  return wrap;
+}
+
+async function commitTaskUpdate(task, ctx, data) {
+  const today = new Date().toISOString().slice(0, 10);
+  const uniqueId = (ctx && ctx.uniqueId) || task.assignedUniqueId;
+  const batch = writeBatch(db);
+  const taskRef = doc(db, 'tasks', task.id);
+  const upRef = doc(colRef('taskUpdates'));
+  const base = {
+    taskId: task.id, userId: task.assignedTo, uniqueId, departmentId: task.departmentId ?? null,
+    type: task.type, date: today, createdAt: serverTimestamp(),
+  };
+  if (task.type === 'pendency') {
+    const before = task.pendency ?? 0;
+    const after = before - data.completed + data.added;
+    batch.update(taskRef, { pendency: after, status: after <= 0 ? 'closed' : 'open', updatedAt: serverTimestamp() });
+    batch.set(upRef, { ...base, completed: data.completed, added: data.added, before, after });
+    task.pendency = after; task.status = after <= 0 ? 'closed' : 'open';
+  } else if (data.completed) {
+    batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'closed', updatedAt: serverTimestamp() });
+    batch.set(upRef, { ...base, action: 'completed', completedDate: today });
+    task.oneTimeStatus = 'completed'; task.status = 'closed';
+  } else {
+    batch.update(taskRef, { pendingReason: data.reason, updatedAt: serverTimestamp() });
+    batch.set(upRef, { ...base, action: 'pending', reason: data.reason });
+    task.pendingReason = data.reason;
+  }
+  await batch.commit();
+  toast('Task updated');
+}
+
 async function renderTasks() {
   await withPage(async () => {
     const canAssign = state.user.role === 'admin' || state.user.role === 'dept_head';
@@ -758,39 +885,100 @@ async function renderTasks() {
     if (!tasks.length) return [head, el('div', { class: 'empty' }, 'No tasks.')];
     const tbody = el('tbody');
     tasks.forEach((t) => {
-      const sel = el('select', { onchange: async (e) => { await updateDoc(doc(db, 'tasks', t.id), { status: e.target.value }); if (e.target.value === 'done' && t.assignedBy && t.assignedBy !== state.user.uid) await addDoc(colRef('notifications'), { userId: t.assignedBy, message: `Task completed: "${t.title}"`, type: 'task', relatedId: t.id, isRead: false, createdAt: serverTimestamp() }); toast('Task updated'); renderTasks(); } },
-        ...['pending', 'in_progress', 'done'].map((s) => el('option', { value: s, selected: t.status === s }, s.replace('_', ' '))));
-      tbody.append(el('tr', {}, el('td', {}, el('div', {}, el('strong', {}, t.title), t.description ? el('div', { class: 'muted' }, t.description) : null)),
-        el('td', {}, t.assignedToName || ''), el('td', {}, t.dueDate || '—'), el('td', {}, sel),
-        el('td', {}, canAssign ? el('button', { class: 'btn danger small', onclick: () => delTask(t) }, 'Delete') : null)));
+      const progress = t.type === 'pendency'
+        ? el('span', {}, `pending ${t.pendency ?? 0}` + (t.initialPendency != null ? ` / start ${t.initialPendency}` : ''))
+        : el('span', { class: 'pill ' + (t.oneTimeStatus === 'completed' ? 'done' : 'pending') }, t.oneTimeStatus || 'pending');
+      tbody.append(el('tr', {},
+        el('td', {}, el('div', {}, el('strong', {}, t.title), t.description ? el('div', { class: 'muted' }, t.description) : null,
+          el('div', { class: 'muted', style: 'font-size:12px' }, taskMeta(t)))),
+        el('td', {}, t.assignedToName || ''),
+        el('td', {}, t.type === 'pendency' ? 'quantity' : 'one-time'),
+        el('td', {}, progress),
+        el('td', {}, el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open')),
+        el('td', {}, el('div', { class: 'row-actions' },
+          t.status !== 'closed' ? el('button', { class: 'btn ghost small', onclick: () => openTaskUpdate(t) }, 'Update') : null,
+          el('button', { class: 'btn ghost small', onclick: () => taskHistory(t) }, 'History'),
+          canAssign ? el('button', { class: 'btn danger small', onclick: () => delTask(t) }, 'Delete') : null))));
     });
-    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Assignee'), el('th', {}, 'Due'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
+    return [head, el('table', {}, el('thead', {}, el('tr', {},
+      el('th', {}, 'Task'), el('th', {}, 'Assignee'), el('th', {}, 'Type'), el('th', {}, 'Progress'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
   });
 }
+
+function openTaskUpdate(t) {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  const box = el('div', { class: 'modal' }, el('h3', {}, 'Update · ' + t.title),
+    el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, taskMeta(t)),
+    taskUpdateControls(t, { uniqueId: t.assignedUniqueId }, () => { backdrop.remove(); renderTasks(); }),
+    el('div', { class: 'modal-actions' }, el('button', { class: 'btn ghost', onclick: () => backdrop.remove() }, 'Close')));
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  backdrop.append(box); document.body.append(backdrop);
+}
+
+async function taskHistory(t) {
+  let ups = [];
+  try { ups = (await getWhere('taskUpdates', 'taskId', t.id)).sort((a, b) => millis(a.createdAt) - millis(b.createdAt)); } catch { /* ignore */ }
+  const body = el('div', {});
+  if (!ups.length) body.append(el('p', { class: 'muted' }, 'No updates yet.'));
+  else ups.forEach((u) => {
+    const when = u.date || fmtDate(u.createdAt);
+    const line = u.type === 'pendency'
+      ? `${when}: completed ${u.completed}, added ${u.added} → pending ${u.after}`
+      : `${when}: ${u.action}${u.reason ? ' — ' + u.reason : ''}${u.completedDate ? ' (' + u.completedDate + ')' : ''}`;
+    body.append(el('div', { class: 'report-answer' }, el('div', { class: 'a' }, line)));
+  });
+  infoModal('History · ' + t.title, body);
+}
+
 function taskModal(users) {
   const title = el('input', { required: true });
   const desc = el('textarea', {});
-  // tasks can only go to people with a login (they need to sign in to see them)
-  const loginUsers = users.filter((u) => u.authUid && u.id !== state.user.uid);
-  const assignee = el('select', { required: true }, el('option', { value: '' }, loginUsers.length ? '— choose —' : 'No users with a login yet'),
-    ...loginUsers.map((u) => el('option', { value: u.id }, `${u.name} (${u.email || u.uniqueId})`)));
-  const due = el('input', { type: 'date' });
+  const assignable = users.filter((u) => u.id !== state.user.uid && u.uniqueId);
+  const assignee = el('select', { required: true }, el('option', { value: '' }, assignable.length ? '— choose —' : 'Add a user first'),
+    ...assignable.map((u) => el('option', { value: u.id }, `${u.name} (${u.uniqueId})`)));
+  const type = el('select', {}, el('option', { value: 'onetime' }, 'One-time'), el('option', { value: 'pendency' }, 'Quantity / pendency'));
+  const horizon = el('input', { type: 'number', min: '0', step: '1', placeholder: 'e.g. 15' });
+  const pend = el('input', { type: 'number', min: '1', step: '1', placeholder: 'e.g. 100' });
+  const pendLabel = el('label', {}, 'Starting pending count', pend);
+  pendLabel.style.display = 'none';
+  type.addEventListener('change', () => { pendLabel.style.display = type.value === 'pendency' ? '' : 'none'; });
   modal('Assign task', el('div', {},
     el('label', {}, 'Title', title), el('label', {}, 'Description', desc),
-    el('label', {}, 'Assign to (users with a login)', assignee), el('label', {}, 'Due date', due),
-    el('p', { class: 'muted', style: 'font-size:13px' }, 'Tasks appear in the assignee\'s dashboard, so they can only go to people who have a login.')), async () => {
+    el('label', {}, 'Assign to', assignee),
+    el('label', {}, 'Type', type),
+    el('label', {}, 'Horizon in days (optional)', horizon),
+    pendLabel,
+    el('p', { class: 'muted', style: 'font-size:13px' }, 'The person updates this task by entering their Unique ID to report, or from their dashboard if they have a login.')), async () => {
     if (!assignee.value) throw new Error('Choose an assignee');
     const u = users.find((x) => x.id === assignee.value);
+    if (!u.uniqueId) throw new Error('That user has no Unique ID.');
+    const t = type.value;
+    const horizonDays = horizon.value ? parseInt(horizon.value, 10) : null;
+    const dueDate = horizonDays ? addDays(horizonDays) : null;
+    let pendency = null;
+    if (t === 'pendency') { pendency = parseInt(pend.value || '0', 10); if (!(pendency > 0)) throw new Error('Enter a starting pending count greater than 0.'); }
     const taskRef = doc(colRef('tasks'));
     const batch = writeBatch(db);
-    batch.set(taskRef, { title: title.value.trim(), description: desc.value.trim(), assignedTo: u.id, assignedToName: u.name, assignedBy: state.user.uid, departmentId: u.departmentId ?? null, dueDate: due.value || null, status: 'pending', createdAt: serverTimestamp() });
-    batch.set(doc(colRef('notifications')), { userId: u.id, message: `New task assigned: "${title.value.trim()}"`, type: 'task', relatedId: taskRef.id, isRead: false, createdAt: serverTimestamp() });
+    batch.set(taskRef, {
+      title: title.value.trim(), description: desc.value.trim(),
+      assignedTo: u.id, assignedToName: u.name, assignedUniqueId: u.uniqueId, assignedBy: state.user.uid,
+      departmentId: u.departmentId ?? null, type: t, horizonDays, dueDate, status: 'open',
+      oneTimeStatus: t === 'onetime' ? 'pending' : null, pendingReason: null, completedDate: null,
+      pendency: t === 'pendency' ? pendency : null, initialPendency: t === 'pendency' ? pendency : null,
+      createdAt: serverTimestamp(),
+    });
+    batch.update(doc(db, 'codes', u.uniqueId), { tasks: arrayUnion(taskRef.id) });
+    if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New task assigned: "${title.value.trim()}"`, type: 'task', relatedId: taskRef.id, isRead: false, createdAt: serverTimestamp() });
     await batch.commit(); toast('Task assigned'); renderTasks();
   }, 'Assign');
 }
+
 async function delTask(t) {
   if (!confirm(`Delete task "${t.title}"?`)) return;
-  await deleteDoc(doc(db, 'tasks', t.id));
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'tasks', t.id));
+  if (t.assignedUniqueId) batch.update(doc(db, 'codes', t.assignedUniqueId), { tasks: arrayRemove(t.id) });
+  await batch.commit();
   toast('Task deleted'); renderTasks();
 }
 
