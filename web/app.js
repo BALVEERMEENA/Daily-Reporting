@@ -409,11 +409,11 @@ function fieldFor(q) {
  * Authenticated app shell
  * ------------------------------------------------------------------ */
 const PAGES = {
-  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'schedule'],
-  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'schedule'],
+  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'pendency', 'schedule'],
+  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'pendency', 'schedule'],
   employee: ['tasks', 'reports', 'schedule'],
 };
-const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', schedule: 'My Schedule' };
+const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', pendency: 'Pendency', schedule: 'My Schedule' };
 
 function enterApp() {
   root().innerHTML = '';
@@ -443,7 +443,7 @@ const ROUTES = {
   dashboard: renderDashboard, departments: renderDepartments,
   users: () => renderUsers(false), team: () => renderUsers(true),
   questionnaires: renderQuestionnaires, reports: renderReports, tasks: renderTasks,
-  schedule: renderSchedule,
+  pendency: renderPendency, schedule: renderSchedule,
 };
 function navigate(page) {
   state.page = page;
@@ -519,11 +519,13 @@ function infoModal(title, contentNode) {
 async function renderDashboard() {
   await withPage(async () => {
     const [reports, tasks] = await Promise.all([listReports(), listTasks()]);
-    const openTasks = tasks.filter((t) => t.status !== 'done').length;
+    const openTasks = tasks.filter((t) => t.status !== 'closed').length;
+    const pendingTotal = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed').reduce((s, t) => s + (t.pendency || 0), 0);
     return [pageHead(`Welcome, ${state.user.name}`),
       el('div', { class: 'grid' },
         tile('Reports', reports.length, 'in view'),
         tile('Open tasks', openTasks, `of ${tasks.length} total`),
+        tile('Pending total', pendingTotal, 'across your scope'),
         tile('Unread alerts', state.notifications.filter((n) => !n.isRead).length, 'notifications')),
       el('h3', { style: 'margin-top:28px' }, 'Recent reports'), reportsTable(reports.slice(0, 8))];
   });
@@ -967,6 +969,48 @@ async function renderSchedule() {
     const mount = el('div', {});
     renderScheduler(uid, items, mount);
     return [head, mount];
+  });
+}
+
+/* ---- Cumulative pendency (roll-up across the subtree) ---- */
+async function renderPendency() {
+  await withPage(async () => {
+    const [tasks, departments] = await Promise.all([listTasks(), listDepartments().catch(() => [])]);
+    const pend = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed');
+    const head = pageHead('Pendency (cumulative)');
+    const grand = pend.reduce((s, t) => s + (t.pendency || 0), 0);
+    const totalTile = el('div', { class: 'tile', style: 'margin-bottom:14px' }, el('h3', {}, 'Total pending (your scope)'), el('div', { class: 'big' }, String(grand)), el('div', { class: 'muted' }, `${pend.length} open quantity task(s)`));
+    if (!pend.length) return [head, totalTile, el('div', { class: 'empty' }, 'No open quantity/pendency tasks.')];
+
+    const paths = computePaths(departments);
+    let scopeDepts = departments;
+    if (state.user.role === 'dept_head') {
+      const my = state.user.departmentId;
+      scopeDepts = departments.filter((d) => (paths[d.id] || []).includes(my));
+    }
+    const ordered = scopeDepts.slice().sort((a, b) =>
+      (paths[a.id] || []).map((id) => deptName(departments, id)).join('/').localeCompare(
+        (paths[b.id] || []).map((id) => deptName(departments, id)).join('/')));
+    const direct = (id) => pend.filter((t) => t.departmentId === id).reduce((s, t) => s + (t.pendency || 0), 0);
+    const cumulative = (id) => pend.filter((t) => (t.deptPath || []).includes(id)).reduce((s, t) => s + (t.pendency || 0), 0);
+    const openCount = (id) => pend.filter((t) => (t.deptPath || []).includes(id)).length;
+
+    const tbody = el('tbody');
+    ordered.forEach((d) => {
+      const depth = (paths[d.id] || [d.id]).length - 1;
+      tbody.append(el('tr', {},
+        el('td', {}, el('span', depth ? { class: 'muted' } : {}, (depth ? '—'.repeat(depth) + ' ' : '') + d.name)),
+        el('td', {}, String(direct(d.id))),
+        el('td', {}, el('strong', {}, String(cumulative(d.id)))),
+        el('td', {}, String(openCount(d.id)))));
+    });
+    const noDept = pend.filter((t) => !t.departmentId);
+    if (noDept.length) tbody.append(el('tr', {}, el('td', {}, '(no department)'),
+      el('td', {}, String(noDept.reduce((s, t) => s + (t.pendency || 0), 0))), el('td', {}, '—'), el('td', {}, String(noDept.length))));
+
+    return [head, totalTile,
+      el('p', { class: 'muted', style: 'margin:0 0 12px' }, 'Direct = quantity tasks in that department. Cumulative = that department plus every sub-department beneath it.'),
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Department'), el('th', {}, 'Direct'), el('th', {}, 'Cumulative'), el('th', {}, 'Open tasks'))), tbody)];
   });
 }
 
