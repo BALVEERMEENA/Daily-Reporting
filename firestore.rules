@@ -145,7 +145,7 @@ service cloud.firestore {
         assignmentData(request.resource.data.assignmentId).userId == request.resource.data.userId &&
         assignmentData(request.resource.data.assignmentId).questionnaireId == request.resource.data.questionnaireId;
       allow update: if false;
-      allow delete: if isAdmin();
+      allow delete: if scoped(resource.data);
     }
 
     // ---- tasks ----
