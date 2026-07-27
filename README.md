@@ -250,6 +250,22 @@ serves Hosting + Firestore locally so you can try everything before deploying.
 > until you also remove it under **Authentication → Users** — deleting Auth
 > accounts requires admin privileges the browser can't hold.
 
+## Install as an app (PWA, Android, iOS)
+
+The Firebase site is a **PWA** (web app manifest in `web/manifest.webmanifest`,
+service worker in `web/sw.js`, icons in `web/icons/`), so it installs to the
+home screen and opens full-screen like a native app.
+
+- **iPhone / iPad:** open the site in **Safari** → Share → **Add to Home Screen**.
+  This is the supported "native" path on iOS — a true App Store `.ipa` would
+  require a Mac, Xcode and a paid Apple Developer account.
+- **Android:** open in **Chrome** → menu → **Install app** / **Add to Home Screen**.
+- **Android APK / Play Store:** wrap the live PWA with
+  [PWABuilder](https://www.pwabuilder.com) (enter your `web.app` URL → generate
+  the Android package) or [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap).
+  Signing the APK and publishing to Play needs a signing key / Play Console
+  account; the PWA itself is the prerequisite and is already in place.
+
 ## Deploy to Fly.io (self-hosted version)
 
 The repo ships a `Dockerfile` and `fly.toml` ready for [Fly.io](https://fly.io),
