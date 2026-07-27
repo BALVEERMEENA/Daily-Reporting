@@ -2,9 +2,10 @@ name: Deploy to Firebase
 
 # Deploys the Firestore security rules and the web/ frontend to Firebase
 # whenever main changes. You can also run it by hand from the Actions tab
-# (Run workflow). Requires one repository secret: FIREBASE_SERVICE_ACCOUNT
-# (the full JSON key of a Firebase service account). The target project is
-# set below via PROJECT_ID (and also lives in .firebaserc).
+# (Run workflow). Requires one repository secret, FIREBASE_SERVICE_ACCOUNT,
+# containing the full (raw JSON) service account key. Authentication is done
+# by Google's official auth action, which writes the key and exports
+# GOOGLE_APPLICATION_CREDENTIALS for the firebase CLI to pick up.
 on:
   push:
     branches: [main]
@@ -17,10 +18,15 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Deploy Firestore rules and Hosting
-        uses: w9jds/firebase-action@master
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          args: deploy --only firestore:rules,hosting --non-interactive
-        env:
-          GCP_SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          PROJECT_ID: dr2785
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Deploy Firestore rules and Hosting
+        run: npx --yes firebase-tools@latest deploy --only firestore:rules,hosting --project dr2785 --non-interactive
