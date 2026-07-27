@@ -1,6 +1,14 @@
 // Daily Reporting — pure client-side Firebase app (Auth + Firestore).
 // All access control is enforced by firestore.rules; this file is the UI and
 // the data calls. No backend server is involved.
+//
+// Users:
+//  - Every user has a name and an admin-chosen Unique ID used for reporting.
+//  - A user optionally has a login (email + password) for dashboard access.
+//    Login users' docs are keyed by their Firebase Auth uid; report-only users
+//    get an auto id and never sign in.
+//  - codes/{uniqueId} is a public-by-id lookup: it maps the Unique ID to the
+//    user and the questionnaires assigned to them, so reporting needs only the id.
 
 import { initializeApp, deleteApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
@@ -10,6 +18,7 @@ import {
 import {
   getFirestore, collection, doc, getDoc, getDocs, setDoc, addDoc,
   updateDoc, deleteDoc, query, where, serverTimestamp, writeBatch,
+  arrayUnion, arrayRemove,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 
@@ -58,20 +67,16 @@ function friendlyError(err) {
     return 'Invalid email or password.';
   if (c === 'auth/email-already-in-use') return 'A user with that email already exists.';
   if (c === 'auth/weak-password') return 'Password should be at least 6 characters.';
+  if (c === 'auth/invalid-email') return 'That email address is not valid.';
   if (c === 'permission-denied') return 'You do not have permission to do that.';
   return (err && err.message) || 'Something went wrong.';
 }
+const normId = (s) => String(s || '').trim().toUpperCase();
 
 /* ------------------------------------------------------------------ *
  * State
  * ------------------------------------------------------------------ */
 const state = { user: null, page: null, notifications: [] };
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function genCode() {
-  const pick = (n) => Array.from({ length: n }, () =>
-    CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
-  return `${pick(4)}-${pick(4)}`;
-}
 
 /* ------------------------------------------------------------------ *
  * Firestore data layer
@@ -155,43 +160,39 @@ function renderConfigNotice() {
     el('h1', {}, 'Almost there'),
     el('p', { class: 'muted' }, 'Firebase is not configured yet. Edit '),
     el('pre', { style: 'background:#f1f5f9;padding:12px;border-radius:8px;overflow:auto' }, 'web/firebase-config.js'),
-    el('p', { class: 'muted' }, 'and paste your project\'s web config (Firebase console → Project settings → Your apps → Web). Then reload this page.'))));
+    el('p', { class: 'muted' }, 'and paste your project\'s web config, then reload.'))));
 }
 function renderNoProfile(fbUser, extra) {
   root().innerHTML = '';
   root().append(centered(el('div', { class: 'card', style: 'max-width:520px' },
     el('h1', {}, 'No access yet'),
-    el('p', { class: 'muted' }, `You're signed in as ${fbUser.email}, but this account has no profile. An admin needs to add you before you can use the app.`),
+    el('p', { class: 'muted' }, `You're signed in as ${fbUser.email}, but this account has no profile. An admin needs to add you before you can use the dashboard.`),
     extra ? el('p', { class: 'error' }, extra) : null,
     el('button', { class: 'btn', onclick: () => signOut(auth) }, 'Sign out'))));
 }
-
 function centered(cardNode) {
   return el('div', { style: 'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px' }, cardNode);
 }
 
 /* ------------------------------------------------------------------ *
- * Public: report with a code / login
+ * Public: report with a Unique ID / login
  * ------------------------------------------------------------------ */
 function renderPublic() {
   root().innerHTML = '';
-  const codeInput = el('input', { class: 'code-entry', placeholder: 'XXXX-XXXX', autocomplete: 'off' });
+  const idInput = el('input', { class: 'code-entry', placeholder: 'YOUR ID', autocomplete: 'off' });
   const errBox = el('div', { class: 'error' });
   const container = el('div', {});
-  const form = el('form', {}, codeInput, el('button', { type: 'submit', class: 'btn primary' }, 'Open'));
+  const form = el('form', {}, idInput, el('button', { type: 'submit', class: 'btn primary' }, 'Open'));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     errBox.textContent = '';
     container.innerHTML = '';
-    const code = codeInput.value.trim().toUpperCase();
-    if (!code) return;
+    const uniqueId = normId(idInput.value);
+    if (!uniqueId) return;
     try {
-      const snap = await getDoc(doc(db, 'codes', code));
-      if (!snap.exists() || snap.data().active !== true) throw new Error('That code is not valid. Please check and try again.');
-      const codeData = snap.data();
-      const qn = await getDoc(doc(db, 'questionnaires', codeData.questionnaireId));
-      if (!qn.exists() || qn.data().active !== true) throw new Error('This questionnaire is no longer accepting responses.');
-      renderReportForm(code, codeData, { id: qn.id, ...qn.data() }, container);
+      const snap = await getDoc(doc(db, 'codes', uniqueId));
+      if (!snap.exists() || snap.data().active === false) throw new Error('That ID is not valid. Please check and try again.');
+      openReporter(uniqueId, snap.data(), container);
     } catch (err) {
       errBox.textContent = friendlyError(err);
     }
@@ -199,7 +200,7 @@ function renderPublic() {
 
   const card = el('div', { class: 'card code-card' },
     el('h1', {}, 'Daily Reporting'),
-    el('p', { class: 'muted' }, 'Enter the code your manager gave you to open your report.'),
+    el('p', { class: 'muted' }, 'Enter your Unique ID to open your report.'),
     form, errBox, container,
     el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →')));
   root().append(centered(card));
@@ -222,13 +223,41 @@ function renderLogin() {
   });
   root().append(centered(el('div', { class: 'card login-card' },
     el('h1', {}, 'Sign in'), form, errBox,
-    el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderPublic(); } }, '← Report with a code')))));
+    el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderPublic(); } }, '← Report with your ID')))));
 }
 
-function renderReportForm(code, codeData, qn, container) {
+/** After a valid Unique ID, show the assigned questionnaire(s). */
+function openReporter(uniqueId, codeData, container) {
+  container.innerHTML = '';
+  const list = (codeData.questionnaires || []);
+  container.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)));
+  if (!list.length) {
+    container.append(el('p', { class: 'muted' }, 'No questionnaire has been assigned to you yet. Please check with your manager.'));
+    return;
+  }
+  if (list.length === 1) return loadReportForm(uniqueId, codeData, list[0], container);
+  container.append(el('p', { class: 'muted' }, 'Choose a report to fill in:'));
+  list.forEach((entry) => container.append(
+    el('button', { class: 'btn', style: 'width:100%;justify-content:flex-start;margin-bottom:8px',
+      onclick: () => loadReportForm(uniqueId, codeData, entry, container) }, entry.title || 'Report')));
+}
+
+async function loadReportForm(uniqueId, codeData, entry, container) {
+  container.innerHTML = 'Loading…';
+  try {
+    const qn = await getDoc(doc(db, 'questionnaires', entry.questionnaireId));
+    if (!qn.exists() || qn.data().active !== true) throw new Error('This questionnaire is no longer available.');
+    renderReportForm(uniqueId, codeData, entry, { id: qn.id, ...qn.data() }, container);
+  } catch (err) {
+    container.innerHTML = '';
+    container.append(el('p', { class: 'error' }, friendlyError(err)));
+  }
+}
+
+function renderReportForm(uniqueId, codeData, entry, qn, container) {
   container.innerHTML = '';
   const form = el('form', {});
-  form.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.userName || ''}`)), el('h2', {}, qn.title),
+  form.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)), el('h2', {}, qn.title),
     qn.description ? el('p', { class: 'muted' }, qn.description) : null);
   const questions = (qn.questions || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0));
   const inputs = [];
@@ -247,12 +276,12 @@ function renderReportForm(code, codeData, qn, container) {
     btn.disabled = true;
     try {
       await addDoc(colRef('submissions'), {
-        code,
-        assignmentId: codeData.assignmentId,
-        questionnaireId: codeData.questionnaireId,
-        questionnaireTitle: qn.title,
+        uniqueId,
         userId: codeData.userId,
-        userName: codeData.userName || '',
+        userName: codeData.name || '',
+        assignmentId: entry.assignmentId,
+        questionnaireId: entry.questionnaireId,
+        questionnaireTitle: qn.title,
         departmentId: codeData.departmentId ?? null,
         answers: inputs.map(({ q, get }) => ({
           questionId: q.id, question: q.text,
@@ -308,24 +337,22 @@ const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Use
 
 function enterApp() {
   root().innerHTML = '';
-  const nav = el('nav', { id: 'nav' });
   const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
   const bell = el('button', { class: 'bell', title: 'Notifications', onclick: toggleNotifications }, '🔔', bellCount);
-  const panel = el('div', { id: 'notif-panel', class: 'notif-panel hidden' });
+  const nav = el('nav', { id: 'nav' });
   const shell = el('div', {},
     el('header', { class: 'topbar' },
       el('div', { class: 'brand' }, 'Daily Reporting'), nav,
       el('div', { class: 'topbar-right' }, bell,
         el('span', { class: 'user-label' }, `${state.user.name} · ${state.user.role.replace('_', ' ')}`),
         el('button', { class: 'btn ghost small', onclick: () => signOut(auth) }, 'Logout'))),
-    panel, el('main', { id: 'page', class: 'page' }));
+    el('div', { id: 'notif-panel', class: 'notif-panel hidden' }), el('main', { id: 'page', class: 'page' }));
   root().append(shell);
 
   const pages = PAGES[state.user.role] || ['reports'];
-  pages.forEach((p) => nav.append(el('button', {
-    class: 'nav-item', 'data-page': p, onclick: () => navigate(p),
-  }, state.user.role === 'employee' && p === 'reports' ? 'My Reports'
-    : state.user.role === 'employee' && p === 'tasks' ? 'My Tasks' : LABELS[p])));
+  pages.forEach((p) => nav.append(el('button', { class: 'nav-item', 'data-page': p, onclick: () => navigate(p) },
+    state.user.role === 'employee' && p === 'reports' ? 'My Reports'
+      : state.user.role === 'employee' && p === 'tasks' ? 'My Tasks' : LABELS[p])));
   navigate(pages[0]);
   refreshNotifications();
   if (!state._notifTimer) state._notifTimer = setInterval(refreshNotifications, 30000);
@@ -411,13 +438,12 @@ async function renderDashboard() {
   await withPage(async () => {
     const [reports, tasks] = await Promise.all([listReports(), listTasks()]);
     const openTasks = tasks.filter((t) => t.status !== 'done').length;
-    const nodes = [pageHead(`Welcome, ${state.user.name}`),
+    return [pageHead(`Welcome, ${state.user.name}`),
       el('div', { class: 'grid' },
         tile('Reports', reports.length, 'in view'),
         tile('Open tasks', openTasks, `of ${tasks.length} total`),
         tile('Unread alerts', state.notifications.filter((n) => !n.isRead).length, 'notifications')),
       el('h3', { style: 'margin-top:28px' }, 'Recent reports'), reportsTable(reports.slice(0, 8))];
-    return nodes;
   });
 }
 function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
@@ -443,15 +469,12 @@ async function renderDepartments() {
 function departmentModal(dept, users) {
   const name = el('input', { value: dept ? dept.name : '', required: true });
   const head = el('select', {}, el('option', { value: '' }, '— none —'),
-    ...users.map((u) => el('option', { value: u.id, selected: dept && dept.headUserId === u.id }, `${u.name} (${u.email})`)));
+    ...users.filter((u) => u.authUid).map((u) => el('option', { value: u.id, selected: dept && dept.headUserId === u.id }, `${u.name} (${u.email || u.uniqueId})`)));
   modal(dept ? 'Edit department' : 'New department',
-    el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Department head', head)), async () => {
+    el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Department head (must have a login)', head)), async () => {
       const headId = head.value || null;
       if (dept) await updateDoc(doc(db, 'departments', dept.id), { name: name.value.trim(), headUserId: headId });
-      else {
-        const ref = await addDoc(colRef('departments'), { name: name.value.trim(), headUserId: headId, createdAt: serverTimestamp() });
-        dept = { id: ref.id };
-      }
+      else { const ref = await addDoc(colRef('departments'), { name: name.value.trim(), headUserId: headId, createdAt: serverTimestamp() }); dept = { id: ref.id }; }
       if (headId) await updateDoc(doc(db, 'users', headId), { role: 'dept_head', departmentId: dept.id });
       toast('Department saved'); renderDepartments();
     });
@@ -471,48 +494,102 @@ async function renderUsers(teamOnly) {
     const [users, departments] = await Promise.all([listUsers(), listDepartments().catch(() => [])]);
     const deptName = (id) => (departments.find((d) => d.id === id) || {}).name || '—';
     const head = pageHead(teamOnly ? 'My Team' : 'Users', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => userModal(null, departments) }, '+ Add user')]);
+    if (!users.length) return [head, el('div', { class: 'empty' }, 'No users yet. Add one to hand out a reporting ID.')];
     const tbody = el('tbody');
     users.forEach((u) => tbody.append(el('tr', {},
-      el('td', {}, u.name), el('td', {}, u.email),
+      el('td', {}, u.name),
+      el('td', {}, el('span', { class: 'code-chip' }, u.uniqueId || '—'),
+        u.uniqueId ? el('button', { class: 'btn ghost small', style: 'margin-left:6px', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(u.uniqueId); toast('Copied ' + u.uniqueId); } }, 'Copy') : null),
       el('td', {}, el('span', { class: 'pill ' + u.role }, u.role.replace('_', ' '))),
       el('td', {}, deptName(u.departmentId)),
+      el('td', {}, u.authUid ? (u.email || 'yes') : '—'),
       el('td', {}, el('div', { class: 'row-actions' },
-        state.user.role === 'admin' ? el('button', { class: 'btn ghost small', onclick: () => userModal(u, departments) }, 'Edit') : null,
-        state.user.role === 'admin' && u.id !== state.user.uid ? el('button', { class: 'btn danger small', onclick: () => delUser(u) }, 'Delete') : null)))));
-    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Email'), el('th', {}, 'Role'), el('th', {}, 'Department'), el('th', {}, ''))), tbody)];
+        el('button', { class: 'btn ghost small', onclick: () => userModal(u, departments) }, 'Edit'),
+        u.id !== state.user.uid ? el('button', { class: 'btn danger small', onclick: () => delUser(u) }, 'Delete') : null)))));
+    return [head, el('table', {}, el('thead', {}, el('tr', {},
+      el('th', {}, 'Name'), el('th', {}, 'Unique ID'), el('th', {}, 'Role'), el('th', {}, 'Department'), el('th', {}, 'Login'), el('th', {}, ''))), tbody)];
   });
 }
+
 function userModal(user, departments) {
   const isAdmin = state.user.role === 'admin';
+  const editing = !!user;
   const name = el('input', { value: user ? user.name : '', required: true });
-  const email = el('input', { type: 'email', value: user ? user.email : '', required: true, ...(user ? { disabled: true } : {}) });
-  const password = el('input', { type: 'password', placeholder: user ? '(managed in Firebase Auth)' : 'min 6 characters', ...(user ? { disabled: true } : {}) });
+  const uniqueId = el('input', { value: user ? user.uniqueId || '' : '', placeholder: 'e.g. EMP001', ...(editing ? { disabled: true } : { required: true }) });
   const role = el('select', {}, ...['employee', 'dept_head', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r }, r.replace('_', ' '))));
   const dept = el('select', {}, el('option', { value: '' }, '— none —'), ...departments.map((d) => el('option', { value: d.id, selected: user && user.departmentId === d.id }, d.name)));
-  const content = el('div', {}, el('label', {}, 'Name', name), el('label', {}, 'Email', email),
-    user ? null : el('label', {}, 'Password', password),
-    isAdmin ? el('label', {}, 'Role', role) : null, isAdmin ? el('label', {}, 'Department', dept) : null);
-  modal(user ? 'Edit user' : 'Add user', content, async () => {
-    if (user) {
+  const email = el('input', { type: 'email', value: user ? user.email || '' : '', ...(editing ? { disabled: true } : {}) });
+  const password = el('input', { type: 'password', placeholder: 'min 6 characters', ...(editing ? { disabled: true } : {}) });
+
+  const loginSection = el('div', {},
+    el('label', {}, 'Login email (optional)', email),
+    el('label', {}, 'Login password (optional)', password),
+    el('p', { class: 'muted', style: 'margin-top:-4px;font-size:13px' },
+      editing ? 'Login details are managed in the Firebase console.' : 'Fill these only if this person needs to sign in. Managers (admin / dept head) require a login.'));
+
+  const content = el('div', {},
+    el('label', {}, 'Name', name),
+    el('label', {}, 'Unique ID (used for reporting)', uniqueId),
+    isAdmin ? el('label', {}, 'Role', role) : null,
+    isAdmin ? el('label', {}, 'Department', dept) : null,
+    loginSection);
+
+  modal(editing ? 'Edit user' : 'Add user', content, async () => {
+    if (editing) {
       const patch = { name: name.value.trim() };
       if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; }
       await updateDoc(doc(db, 'users', user.id), patch);
-    } else {
-      if (!password.value || password.value.length < 6) throw new Error('Password must be at least 6 characters.');
-      const newRole = isAdmin ? role.value : 'employee';
-      const newDept = isAdmin ? (dept.value || null) : state.user.departmentId;
-      const uid = await createAuthUser(email.value.trim(), password.value);
-      await setDoc(doc(db, 'users', uid), { name: name.value.trim(), email: email.value.trim(), role: newRole, departmentId: newDept, createdAt: serverTimestamp() });
+      // keep the reporting-code doc's name/department in sync
+      if (user.uniqueId) {
+        const codePatch = { name: name.value.trim() };
+        if (isAdmin) codePatch.departmentId = dept.value || null;
+        await updateDoc(doc(db, 'codes', user.uniqueId), codePatch).catch(() => {});
+      }
+      toast('User saved'); navigate(state.page); return;
     }
-    toast('User saved'); navigate(state.page);
+
+    // creating
+    const uid = normId(uniqueId.value);
+    if (!uid) throw new Error('A Unique ID is required.');
+    const existing = await getDoc(doc(db, 'codes', uid));
+    if (existing.exists()) throw new Error('That Unique ID is already in use.');
+
+    const newRole = isAdmin ? role.value : 'employee';
+    const newDept = isAdmin ? (dept.value || null) : state.user.departmentId;
+    const wantsLogin = !!email.value.trim();
+    if ((newRole === 'admin' || newRole === 'dept_head') && !wantsLogin)
+      throw new Error('Admins and department heads need a login (email + password).');
+    if (wantsLogin && password.value.length < 6) throw new Error('Login password must be at least 6 characters.');
+
+    let docId, authUid = null;
+    if (wantsLogin) { authUid = await createAuthUser(email.value.trim(), password.value); docId = authUid; }
+    else { docId = doc(colRef('users')).id; }
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'users', docId), {
+      name: name.value.trim(), uniqueId: uid, role: newRole, departmentId: newDept,
+      authUid, email: wantsLogin ? email.value.trim() : null, createdAt: serverTimestamp(),
+    });
+    batch.set(doc(db, 'codes', uid), {
+      userId: docId, name: name.value.trim(), departmentId: newDept, questionnaires: [], active: true,
+    });
+    await batch.commit();
+    toast('User added'); navigate(state.page);
   });
 }
+
 async function delUser(u) {
-  if (!confirm(`Remove "${u.name}"? This removes their profile and access.`)) return;
-  await deleteDoc(doc(db, 'users', u.id));
+  if (!confirm(`Remove "${u.name}"? Their reporting ID and assignments are removed.`)) return;
+  const assigns = await getWhere('assignments', 'userId', u.id).catch(() => []);
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'users', u.id));
+  if (u.uniqueId) batch.delete(doc(db, 'codes', u.uniqueId));
+  assigns.forEach((a) => batch.delete(doc(db, 'assignments', a.id)));
+  await batch.commit();
   toast('User removed');
-  infoModal('One more step', el('div', {}, el('p', {}, `${u.name}'s profile is removed, so they can no longer access any data.`),
-    el('p', { class: 'muted' }, 'Their Firebase Authentication login still exists. To fully delete it, remove the user in the Firebase console → Authentication. (Deleting Auth users requires admin privileges the browser app does not have.)')));
+  if (u.authUid) infoModal('One more step', el('div', {},
+    el('p', {}, `${u.name}'s profile and reporting ID are removed.`),
+    el('p', { class: 'muted' }, 'Their Firebase Authentication login still exists — remove it in the Firebase console → Authentication if you want it fully deleted.')));
   navigate(state.page);
 }
 
@@ -529,7 +606,7 @@ async function renderQuestionnaires() {
       el('td', {}, q.title), el('td', {}, String((q.questions || []).length)), el('td', {}, String(counts[i])),
       el('td', {}, el('span', { class: 'pill ' + (q.active ? 'done' : 'pending') }, q.active ? 'active' : 'inactive')),
       el('td', {}, el('div', { class: 'row-actions' },
-        el('button', { class: 'btn ghost small', onclick: () => manageAssignments(q) }, 'Assign & codes'),
+        el('button', { class: 'btn ghost small', onclick: () => manageAssignments(q) }, 'Assign'),
         el('button', { class: 'btn ghost small', onclick: () => questionnaireModal(q) }, 'Edit'),
         el('button', { class: 'btn danger small', onclick: () => delQuestionnaire(q) }, 'Delete'))))));
     return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Title'), el('th', {}, 'Questions'), el('th', {}, 'Assigned'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
@@ -568,10 +645,15 @@ function questionnaireModal(existing) {
   }, existing ? 'Save changes' : 'Create');
 }
 async function delQuestionnaire(q) {
-  if (!confirm(`Delete "${q.title}"? Its assignments and codes are removed (past reports are kept).`)) return;
-  const assigns = await getWhere('assignments', 'questionnaireId', q.id);
+  if (!confirm(`Delete "${q.title}"? Its assignments are removed (past reports are kept).`)) return;
+  const [assigns, users] = await Promise.all([getWhere('assignments', 'questionnaireId', q.id), listUsers().catch(() => [])]);
+  const uidById = Object.fromEntries(users.map((u) => [u.id, u.uniqueId]));
   const batch = writeBatch(db);
-  assigns.forEach((a) => { batch.delete(doc(db, 'assignments', a.id)); if (a.code) batch.delete(doc(db, 'codes', a.code)); });
+  assigns.forEach((a) => {
+    batch.delete(doc(db, 'assignments', a.id));
+    const code = uidById[a.userId];
+    if (code) batch.update(doc(db, 'codes', code), { questionnaires: arrayRemove({ assignmentId: a.id, questionnaireId: q.id, title: q.title }) });
+  });
   batch.delete(doc(db, 'questionnaires', q.id));
   await batch.commit();
   toast('Questionnaire deleted'); renderQuestionnaires();
@@ -579,10 +661,11 @@ async function delQuestionnaire(q) {
 
 async function manageAssignments(q) {
   const [assignments, users] = await Promise.all([getWhere('assignments', 'questionnaireId', q.id), listUsers()]);
+  const userById = Object.fromEntries(users.map((u) => [u.id, u]));
   const listNode = el('div', {});
   const userSelect = el('select', {});
-  const backdrop = infoModal(`Assignments · ${q.title}`, el('div', {},
-    el('p', { class: 'muted' }, `Assign "${q.title}" to employees. Each gets a unique code to open their report.`),
+  infoModal(`Assign · ${q.title}`, el('div', {},
+    el('p', { class: 'muted' }, `Assign "${q.title}" to people. Each reports by entering their own Unique ID.`),
     el('div', { class: 'inline' }, userSelect, el('button', { class: 'btn primary', style: 'width:auto', onclick: doAssign }, 'Assign')),
     el('hr'), listNode));
 
@@ -591,50 +674,43 @@ async function manageAssignments(q) {
     const assigned = new Set(current.map((a) => a.userId));
     const available = users.filter((u) => !assigned.has(u.id));
     userSelect.innerHTML = '';
-    userSelect.append(el('option', { value: '' }, available.length ? '— choose employee —' : 'Everyone is assigned'),
-      ...available.map((u) => el('option', { value: u.id }, `${u.name} (${u.email})`)));
+    userSelect.append(el('option', { value: '' }, available.length ? '— choose person —' : 'Everyone is assigned'),
+      ...available.map((u) => el('option', { value: u.id }, `${u.name} (${u.uniqueId || 'no id'})`)));
   }
   function renderList() {
     listNode.innerHTML = '';
     if (!current.length) { listNode.append(el('p', { class: 'muted' }, 'No one assigned yet.')); return; }
     const tbody = el('tbody');
-    current.forEach((a) => tbody.append(el('tr', {}, el('td', {}, a.userName),
-      el('td', {}, el('span', { class: 'code-chip' }, a.code)), el('td', {},
-        el('div', { class: 'row-actions' },
-          el('button', { class: 'btn ghost small', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(a.code); toast('Copied ' + a.code); } }, 'Copy'),
-          el('button', { class: 'btn ghost small', onclick: () => regen(a) }, 'New code'),
-          el('button', { class: 'btn danger small', onclick: () => unassign(a) }, 'Remove'))))));
-    listNode.append(el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Code'), el('th', {}, ''))), tbody));
+    current.forEach((a) => {
+      const u = userById[a.userId] || {};
+      tbody.append(el('tr', {}, el('td', {}, a.userName || u.name || '—'),
+        el('td', {}, el('span', { class: 'code-chip' }, u.uniqueId || '—')),
+        el('td', {}, el('button', { class: 'btn danger small', onclick: () => unassign(a) }, 'Remove'))));
+    });
+    listNode.append(el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Person'), el('th', {}, 'Unique ID'), el('th', {}, ''))), tbody));
   }
   async function reload() { current = await getWhere('assignments', 'questionnaireId', q.id); refreshSelect(); renderList(); }
   async function doAssign() {
     if (!userSelect.value) return;
-    const user = users.find((u) => u.id === userSelect.value);
-    const code = genCode();
+    const u = userById[userSelect.value];
+    if (!u.uniqueId) { toast('That user has no Unique ID', true); return; }
     const assignRef = doc(colRef('assignments'));
+    const entry = { assignmentId: assignRef.id, questionnaireId: q.id, title: q.title };
     const batch = writeBatch(db);
-    batch.set(assignRef, { questionnaireId: q.id, userId: user.id, userName: user.name, code, departmentId: user.departmentId ?? null, active: true, createdAt: serverTimestamp() });
-    batch.set(doc(db, 'codes', code), { assignmentId: assignRef.id, questionnaireId: q.id, userId: user.id, userName: user.name, departmentId: user.departmentId ?? null, active: true });
-    batch.set(doc(colRef('notifications')), { userId: user.id, message: `New questionnaire assigned: "${q.title}" — code ${code}`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
+    batch.set(assignRef, { questionnaireId: q.id, userId: u.id, userName: u.name, departmentId: u.departmentId ?? null, active: true, createdAt: serverTimestamp() });
+    batch.update(doc(db, 'codes', u.uniqueId), { questionnaires: arrayUnion(entry) });
+    if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New questionnaire assigned: "${q.title}"`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
     await batch.commit(); toast('Assigned'); reload();
   }
-  async function regen(a) {
-    const code = genCode();
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'codes', code), { assignmentId: a.id, questionnaireId: a.questionnaireId, userId: a.userId, userName: a.userName, departmentId: a.departmentId ?? null, active: true });
-    batch.update(doc(db, 'assignments', a.id), { code });
-    if (a.code) batch.delete(doc(db, 'codes', a.code));
-    await batch.commit(); toast('New code issued'); reload();
-  }
   async function unassign(a) {
-    if (!confirm(`Remove ${a.userName}'s assignment?`)) return;
+    const u = userById[a.userId] || {};
+    if (!confirm(`Remove ${a.userName || u.name}'s assignment?`)) return;
     const batch = writeBatch(db);
     batch.delete(doc(db, 'assignments', a.id));
-    if (a.code) batch.delete(doc(db, 'codes', a.code));
+    if (u.uniqueId) batch.update(doc(db, 'codes', u.uniqueId), { questionnaires: arrayRemove({ assignmentId: a.id, questionnaireId: q.id, title: q.title }) });
     await batch.commit(); toast('Removed'); reload();
   }
   refreshSelect(); renderList();
-  void backdrop;
 }
 
 /* ---- Reports ---- */
@@ -694,9 +770,15 @@ async function renderTasks() {
 function taskModal(users) {
   const title = el('input', { required: true });
   const desc = el('textarea', {});
-  const assignee = el('select', { required: true }, el('option', { value: '' }, '— choose —'), ...users.filter((u) => u.id !== state.user.uid).map((u) => el('option', { value: u.id }, `${u.name} (${u.email})`)));
+  // tasks can only go to people with a login (they need to sign in to see them)
+  const loginUsers = users.filter((u) => u.authUid && u.id !== state.user.uid);
+  const assignee = el('select', { required: true }, el('option', { value: '' }, loginUsers.length ? '— choose —' : 'No users with a login yet'),
+    ...loginUsers.map((u) => el('option', { value: u.id }, `${u.name} (${u.email || u.uniqueId})`)));
   const due = el('input', { type: 'date' });
-  modal('Assign task', el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc), el('label', {}, 'Assign to', assignee), el('label', {}, 'Due date', due)), async () => {
+  modal('Assign task', el('div', {},
+    el('label', {}, 'Title', title), el('label', {}, 'Description', desc),
+    el('label', {}, 'Assign to (users with a login)', assignee), el('label', {}, 'Due date', due),
+    el('p', { class: 'muted', style: 'font-size:13px' }, 'Tasks appear in the assignee\'s dashboard, so they can only go to people who have a login.')), async () => {
     if (!assignee.value) throw new Error('Choose an assignee');
     const u = users.find((x) => x.id === assignee.value);
     const taskRef = doc(colRef('tasks'));
