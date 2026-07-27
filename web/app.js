@@ -783,9 +783,13 @@ async function renderApprovals() {
         el('button', { class: 'btn danger', style: 'width:auto', onclick: async () => { try { await resolveApproval(a, false); renderApprovals(); } catch (e) { toast(friendlyError(e), true); } } }, 'Reject')))));
     out.push(el('h3', { style: 'margin-top:24px' }, 'My requests'));
     if (!mine.length) out.push(el('p', { class: 'muted' }, 'You have not submitted any.'));
-    else mine.forEach((a) => out.push(el('div', { class: 'q-builder-item' },
-      el('strong', {}, `${a.type} · ${a.questionnaireTitle}`),
-      el('span', { class: 'pill ' + (a.status === 'approved' ? 'done' : a.status === 'rejected' ? 'pending' : 'in_progress'), style: 'margin-left:8px' }, a.status))));
+    else mine.forEach((a) => out.push(el('div', { class: 'q-builder-item', style: 'display:flex;align-items:center;gap:10px' },
+      el('div', { style: 'flex:1' }, el('strong', {}, `${a.type} · ${a.questionnaireTitle}`),
+        el('span', { class: 'pill ' + (a.status === 'approved' ? 'done' : a.status === 'rejected' ? 'pending' : 'in_progress'), style: 'margin-left:8px' }, a.status)),
+      a.status === 'pending' ? el('button', { class: 'btn danger small', onclick: async () => {
+        if (!confirm('Cancel this pending request?')) return;
+        try { await deleteDoc(doc(db, 'approvals', a.id)); toast('Cancelled'); renderApprovals(); } catch (e) { toast(friendlyError(e), true); }
+      } }, 'Cancel') : null)));
     return out;
   });
 }
@@ -957,8 +961,20 @@ function reportsTable(reports) {
   return el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Submitted'), el('th', {}, 'Employee'), el('th', {}, 'Questionnaire'), el('th', {}, 'Answers'), el('th', {}, ''))), tbody);
 }
 function viewReport(r) {
-  infoModal(r.questionnaireTitle, el('div', {}, el('p', { class: 'muted' }, `${r.userName} · ${fmtDate(r.submittedAt)}`),
-    ...(r.answers || []).map((a) => el('div', { class: 'report-answer' }, el('div', { class: 'q' }, a.question), el('div', { class: 'a' }, a.value || '—')))));
+  const isManager = state.user.role === 'admin' || state.user.role === 'dept_head';
+  const content = el('div', {}, el('p', { class: 'muted' }, `${r.userName} · ${fmtDate(r.submittedAt)}`),
+    ...(r.answers || []).map((a) => el('div', { class: 'report-answer' }, el('div', { class: 'q' }, a.question), el('div', { class: 'a' }, a.value || '—'))));
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  const actions = el('div', { class: 'modal-actions' });
+  if (isManager) actions.append(el('button', { class: 'btn danger', style: 'width:auto;margin-right:auto', onclick: async () => {
+    if (!confirm('Delete this report? This cannot be undone.')) return;
+    try { await deleteDoc(doc(db, 'submissions', r.id)); backdrop.remove(); toast('Report deleted'); navigate(state.page); }
+    catch (e) { toast(friendlyError(e), true); }
+  } }, 'Delete'));
+  actions.append(el('button', { class: 'btn primary', style: 'width:auto', onclick: () => backdrop.remove() }, 'Close'));
+  backdrop.append(el('div', { class: 'modal' }, el('h3', {}, r.questionnaireTitle), content, actions));
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  document.body.append(backdrop);
 }
 function exportCsv(reports) {
   const header = ['submitted_at', 'employee', 'questionnaire', 'question', 'answer'];
@@ -996,7 +1012,22 @@ function renderScheduler(uniqueId, items, mount) {
       el('div', { style: 'flex:1' },
         el('strong', item.done ? { style: 'text-decoration:line-through' } : {}, item.title),
         meta ? el('div', { class: 'muted', style: 'font-size:12px' }, meta) : null),
+      el('button', { class: 'btn ghost small', title: 'Edit', onclick: () => editItem(item) }, '✎'),
       el('button', { class: 'btn danger small', title: 'Delete', onclick: () => persist(list.filter((x) => x.id !== item.id), 'Removed') }, '✕'));
+  }
+  function editItem(item) {
+    const title = el('input', { value: item.title || '', required: true });
+    const date = el('input', { type: 'date', value: item.date || '' });
+    const time = el('input', { type: 'time', value: item.time || '' });
+    const prio = el('select', {}, ...['normal', 'high', 'low'].map((p) => el('option', { value: p, selected: (item.priority || 'normal') === p }, p)));
+    const note = el('input', { value: item.note || '' });
+    modal('Edit scheduled task', el('div', {},
+      el('label', {}, 'Task title', title),
+      el('div', { class: 'inline' }, el('label', { style: 'flex:1;margin:0' }, 'Date', date), el('label', { style: 'flex:1;margin:0' }, 'Time', time), el('label', { style: 'flex:1;margin:0' }, 'Priority', prio)),
+      el('label', { style: 'margin-top:8px' }, 'Note', note)), async () => {
+      if (!title.value.trim()) throw new Error('Enter a task title');
+      await persist(list.map((x) => x.id === item.id ? { ...x, title: title.value.trim(), date: date.value || '', time: time.value || '', priority: prio.value, note: note.value.trim() } : x), 'Saved');
+    }, 'Save');
   }
   function rerender() {
     mount.innerHTML = '';
@@ -1195,6 +1226,7 @@ async function renderTasks() {
         el('td', {}, el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open')),
         el('td', {}, el('div', { class: 'row-actions' },
           t.status !== 'closed' ? el('button', { class: 'btn ghost small', onclick: () => openTaskUpdate(t) }, 'Update') : null,
+          canAssign ? el('button', { class: 'btn ghost small', onclick: () => taskEditModal(t) }, 'Edit') : null,
           el('button', { class: 'btn ghost small', onclick: () => taskHistory(t) }, 'History'),
           canAssign ? el('button', { class: 'btn danger small', onclick: () => delTask(t) }, 'Delete') : null))));
     });
@@ -1269,6 +1301,28 @@ function taskModal(users) {
     if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New task assigned: "${title.value.trim()}"`, type: 'task', relatedId: taskRef.id, isRead: false, createdAt: serverTimestamp() });
     await batch.commit(); toast('Task assigned'); renderTasks();
   }, 'Assign');
+}
+
+function taskEditModal(t) {
+  const title = el('input', { value: t.title || '', required: true });
+  const desc = el('textarea', {}, t.description || '');
+  const due = el('input', { type: 'date', value: t.dueDate || '' });
+  const pend = el('input', { type: 'number', min: '0', step: '1', value: String(t.pendency ?? 0) });
+  modal('Edit task', el('div', {},
+    el('label', {}, 'Title', title),
+    el('label', {}, 'Description', desc),
+    el('label', {}, 'Due date', due),
+    t.type === 'pendency' ? el('label', {}, 'Current pending count', pend) : null),
+    async () => {
+      const patch = { title: title.value.trim(), description: desc.value.trim(), dueDate: due.value || null, updatedAt: serverTimestamp() };
+      if (t.type === 'pendency') {
+        const p = Math.max(0, parseInt(pend.value || '0', 10) || 0);
+        patch.pendency = p;
+        patch.status = p <= 0 ? 'closed' : 'open';
+      }
+      await updateDoc(doc(db, 'tasks', t.id), patch);
+      toast('Task updated'); renderTasks();
+    }, 'Save changes');
 }
 
 async function delTask(t) {
