@@ -199,6 +199,16 @@ each record, so a head with department `D` can act on any record whose `deptPath
 contains `D`. **Records created before the hierarchy existed have no `deptPath`,
 so they won't roll up to a parent until re-saved** (admins still see them).
 
+### Questionnaire change approvals
+
+Editing or deleting a questionnaire that a department **owns** doesn't apply
+immediately — it becomes a **pending request** on the **Approvals** page that a
+**superior** department head (any ancestor) or an **admin** must approve. On
+approval the change is applied; on rejection it's discarded, and the requester
+is notified either way. Superiors/admins editing a sub-department's
+questionnaire act directly (they are the approval level). Creating a new
+questionnaire needs no approval.
+
 ### How users and reporting work
 
 - **Adding a user** captures a **Name** and a **Unique ID** (you choose it, e.g.
