@@ -237,6 +237,11 @@ a login, on their dashboard. Two kinds:
 Every change is written to an audit log, so managers can open a task's
 **History** to see the day-by-day completed/added/pending trail.
 
+A **Pendency** page rolls the numbers up the tree: for each department in a
+manager's scope it shows **Direct** pending (quantity tasks in that department)
+and **Cumulative** pending (that department plus every sub-department beneath
+it), so a parent sees the summed backlog of its whole subtree.
+
 ### Automated deploy from GitHub (no command line)
 
 For a phone-only / no-PC workflow, `.github/workflows/firebase-deploy.yml`
