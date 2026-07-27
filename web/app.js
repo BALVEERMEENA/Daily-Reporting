@@ -737,21 +737,30 @@ async function manageAssignments(q) {
     if (!userSelect.value) return;
     const u = userById[userSelect.value];
     if (!u.uniqueId) { toast('That user has no Unique ID', true); return; }
-    const assignRef = doc(colRef('assignments'));
-    const entry = { assignmentId: assignRef.id, questionnaireId: q.id, title: q.title };
-    const batch = writeBatch(db);
-    batch.set(assignRef, { questionnaireId: q.id, userId: u.id, userName: u.name, departmentId: u.departmentId ?? null, active: true, createdAt: serverTimestamp() });
-    batch.update(doc(db, 'codes', u.uniqueId), { questionnaires: arrayUnion(entry) });
-    if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New questionnaire assigned: "${q.title}"`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
-    await batch.commit(); toast('Assigned'); reload();
+    try {
+      const assignRef = doc(colRef('assignments'));
+      const entry = { assignmentId: assignRef.id, questionnaireId: q.id, title: q.title };
+      const codeRef = doc(db, 'codes', u.uniqueId);
+      const codeSnap = await getDoc(codeRef);
+      const batch = writeBatch(db);
+      batch.set(assignRef, { questionnaireId: q.id, userId: u.id, userName: u.name, departmentId: u.departmentId ?? null, active: true, createdAt: serverTimestamp() });
+      // Update the code doc, or create it if it somehow doesn't exist yet.
+      if (codeSnap.exists()) batch.update(codeRef, { questionnaires: arrayUnion(entry) });
+      else batch.set(codeRef, { userId: u.id, name: u.name, departmentId: u.departmentId ?? null, questionnaires: [entry], tasks: [], active: true });
+      if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New questionnaire assigned: "${q.title}"`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
+      await batch.commit();
+      toast('Assigned'); reload();
+    } catch (e) { toast(friendlyError(e), true); }
   }
   async function unassign(a) {
     const u = userById[a.userId] || {};
     if (!confirm(`Remove ${a.userName || u.name}'s assignment?`)) return;
-    const batch = writeBatch(db);
-    batch.delete(doc(db, 'assignments', a.id));
-    if (u.uniqueId) batch.update(doc(db, 'codes', u.uniqueId), { questionnaires: arrayRemove({ assignmentId: a.id, questionnaireId: q.id, title: q.title }) });
-    await batch.commit(); toast('Removed'); reload();
+    try {
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'assignments', a.id));
+      if (u.uniqueId) batch.update(doc(db, 'codes', u.uniqueId), { questionnaires: arrayRemove({ assignmentId: a.id, questionnaireId: q.id, title: q.title }) });
+      await batch.commit(); toast('Removed'); reload();
+    } catch (e) { toast(friendlyError(e), true); }
   }
   refreshSelect(); renderList();
 }
