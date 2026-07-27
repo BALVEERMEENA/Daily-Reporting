@@ -116,30 +116,31 @@ function deptPathOf(deptId, depts) {
 function deptDepth(d) { return (Array.isArray(d.path) ? d.path.length : 1) - 1; }
 function deptName(depts, id) { return (depts.find((d) => d.id === id) || {}).name || '—'; }
 
+// Department heads see their whole subtree: any record whose deptPath contains
+// their own department id.
+async function getSubtree(name) {
+  return snapList(await getDocs(query(colRef(name), where('deptPath', 'array-contains', state.user.departmentId))));
+}
 async function listUsers() {
-  const rows = state.user.role === 'admin'
-    ? await getAll('users')
-    : await getWhere('users', 'departmentId', state.user.departmentId);
+  const rows = state.user.role === 'admin' ? await getAll('users') : await getSubtree('users');
   return rows.sort(byName);
 }
 async function listDepartments() { return (await getAll('departments')).sort(byName); }
 async function listQuestionnaires() {
-  const rows = state.user.role === 'admin'
-    ? await getAll('questionnaires')
-    : await getWhere('questionnaires', 'departmentId', state.user.departmentId);
+  const rows = state.user.role === 'admin' ? await getAll('questionnaires') : await getSubtree('questionnaires');
   return rows.sort(byCreatedDesc);
 }
 async function listReports() {
   let rows;
   if (state.user.role === 'admin') rows = await getAll('submissions');
-  else if (state.user.role === 'dept_head') rows = await getWhere('submissions', 'departmentId', state.user.departmentId);
+  else if (state.user.role === 'dept_head') rows = await getSubtree('submissions');
   else rows = await getWhere('submissions', 'userId', state.user.uid);
   return rows.sort((a, b) => millis(b.submittedAt) - millis(a.submittedAt));
 }
 async function listTasks() {
   let rows;
   if (state.user.role === 'admin') rows = await getAll('tasks');
-  else if (state.user.role === 'dept_head') rows = await getWhere('tasks', 'departmentId', state.user.departmentId);
+  else if (state.user.role === 'dept_head') rows = await getSubtree('tasks');
   else rows = await getWhere('tasks', 'assignedTo', state.user.uid);
   return rows.sort(byCreatedDesc);
 }
@@ -361,6 +362,7 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
         questionnaireId: entry.questionnaireId,
         questionnaireTitle: qn.title,
         departmentId: codeData.departmentId ?? null,
+        deptPath: codeData.deptPath ?? null,
         answers: inputs.map(({ q, get }) => ({
           questionId: q.id, question: q.text,
           value: Array.isArray(get()) ? get().join(', ') : String(get()),
@@ -734,9 +736,13 @@ async function renderQuestionnaires() {
     return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Title'), el('th', {}, 'Questions'), el('th', {}, 'Assigned'), el('th', {}, 'Status'), el('th', {}, ''))), tbody)];
   });
 }
-function questionnaireModal(existing) {
+async function questionnaireModal(existing) {
+  const isAdmin = state.user.role === 'admin';
+  const departments = await listDepartments().catch(() => []);
   const title = el('input', { value: existing ? existing.title : '', required: true });
   const desc = el('textarea', {}, existing ? existing.description || '' : '');
+  const deptSel = el('select', {}, el('option', { value: '' }, isAdmin ? '— none (admin-only) —' : '(your department)'),
+    ...departments.map((d) => el('option', { value: d.id, selected: existing && existing.departmentId === d.id }, d.name)));
   const qWrap = el('div', {});
   const addQ = (q = {}, { atTop = false } = {}) => {
     const qid = q.id || 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
@@ -757,17 +763,21 @@ function questionnaireModal(existing) {
     else qWrap.append(item);
   };
   ((existing && existing.questions && existing.questions.length ? existing.questions : [{}])).forEach((q) => addQ(q));
-  const content = el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc), el('label', {}, 'Questions'), qWrap,
+  const content = el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc),
+    isAdmin ? el('label', {}, 'Department', deptSel) : null,
+    el('label', {}, 'Questions'), qWrap,
     el('div', { class: 'inline' },
       el('button', { type: 'button', class: 'btn', onclick: () => addQ({}, { atTop: true }) }, '+ Add at top'),
       el('button', { type: 'button', class: 'btn', onclick: () => addQ() }, '+ Add at end')));
   modal(existing ? 'Edit questionnaire' : 'New questionnaire', content, async () => {
     const questions = Array.from(qWrap.querySelectorAll('.q-builder-item')).map((n, i) => ({ ...n._get(), position: i })).filter((q) => q.text);
     if (!questions.length) throw new Error('Add at least one question');
-    if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), { title: title.value.trim(), description: desc.value.trim(), questions });
+    const departmentId = isAdmin ? (deptSel.value || null) : state.user.departmentId;
+    const deptPath = deptPathOf(departmentId, departments);
+    if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), { title: title.value.trim(), description: desc.value.trim(), questions, departmentId, deptPath });
     else await addDoc(colRef('questionnaires'), {
       title: title.value.trim(), description: desc.value.trim(), questions, active: true,
-      createdBy: state.user.uid, departmentId: state.user.role === 'dept_head' ? state.user.departmentId : null, createdAt: serverTimestamp(),
+      createdBy: state.user.uid, departmentId, deptPath, createdAt: serverTimestamp(),
     });
     toast('Questionnaire saved'); renderQuestionnaires();
   }, existing ? 'Save changes' : 'Create');
@@ -827,11 +837,12 @@ async function manageAssignments(q) {
       const entry = { assignmentId: assignRef.id, questionnaireId: q.id, title: q.title };
       const codeRef = doc(db, 'codes', u.uniqueId);
       const codeSnap = await getDoc(codeRef);
+      const dp = u.deptPath || [];
       const batch = writeBatch(db);
-      batch.set(assignRef, { questionnaireId: q.id, userId: u.id, userName: u.name, departmentId: u.departmentId ?? null, active: true, createdAt: serverTimestamp() });
+      batch.set(assignRef, { questionnaireId: q.id, userId: u.id, userName: u.name, departmentId: u.departmentId ?? null, deptPath: dp, active: true, createdAt: serverTimestamp() });
       // Update the code doc, or create it if it somehow doesn't exist yet.
       if (codeSnap.exists()) batch.update(codeRef, { questionnaires: arrayUnion(entry) });
-      else batch.set(codeRef, { userId: u.id, name: u.name, departmentId: u.departmentId ?? null, questionnaires: [entry], tasks: [], active: true });
+      else batch.set(codeRef, { userId: u.id, name: u.name, departmentId: u.departmentId ?? null, deptPath: dp, questionnaires: [entry], tasks: [], active: true });
       if (u.authUid) batch.set(doc(colRef('notifications')), { userId: u.id, message: `New questionnaire assigned: "${q.title}"`, type: 'questionnaire', relatedId: assignRef.id, isRead: false, createdAt: serverTimestamp() });
       await batch.commit();
       toast('Assigned'); reload();
@@ -1023,7 +1034,7 @@ async function commitTaskUpdate(task, ctx, data) {
   const upRef = doc(colRef('taskUpdates'));
   const base = {
     taskId: task.id, userId: task.assignedTo, uniqueId, departmentId: task.departmentId ?? null,
-    type: task.type, date: today, createdAt: serverTimestamp(),
+    deptPath: task.deptPath ?? [], type: task.type, date: today, createdAt: serverTimestamp(),
   };
   if (task.type === 'pendency') {
     const before = task.pendency ?? 0;
@@ -1131,7 +1142,7 @@ function taskModal(users) {
     batch.set(taskRef, {
       title: title.value.trim(), description: desc.value.trim(),
       assignedTo: u.id, assignedToName: u.name, assignedUniqueId: u.uniqueId, assignedBy: state.user.uid,
-      departmentId: u.departmentId ?? null, type: t, horizonDays, dueDate, status: 'open',
+      departmentId: u.departmentId ?? null, deptPath: u.deptPath || [], type: t, horizonDays, dueDate, status: 'open',
       oneTimeStatus: t === 'onetime' ? 'pending' : null, pendingReason: null, completedDate: null,
       pendency: t === 'pendency' ? pendency : null, initialPendency: t === 'pendency' ? pendency : null,
       createdAt: serverTimestamp(),

@@ -186,6 +186,19 @@ Because there's no server seed, create the very first admin by hand:
    admin creates departments, users, questionnaires, assignments, and tasks —
    no more console work needed.
 
+### Department hierarchy & access
+
+Departments form a tree (a top-level **branch** → departments → sub-departments,
+any depth). A **department head manages their whole subtree**: they can see and
+manage the users, questionnaires, assignments, reports and tasks of their own
+department *and every sub-department beneath it*. Siblings can't see each other;
+employees see only their own data; admins see everything.
+
+This works via a materialized `deptPath` (a department's ancestor ids) stored on
+each record, so a head with department `D` can act on any record whose `deptPath`
+contains `D`. **Records created before the hierarchy existed have no `deptPath`,
+so they won't roll up to a parent until re-saved** (admins still see them).
+
 ### How users and reporting work
 
 - **Adding a user** captures a **Name** and a **Unique ID** (you choose it, e.g.

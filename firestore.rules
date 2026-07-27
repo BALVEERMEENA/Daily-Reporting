@@ -3,14 +3,11 @@ rules_version = '2';
 // Access control for the Daily Reporting app. With no backend server, these
 // rules ARE the security model.
 //
-// Model:
-//  - A "user" is a person. Managers (admin/dept_head) and any employee you give
-//    a login to have a Firebase Auth account, and their users/{uid} doc is keyed
-//    by that auth uid. Report-only employees have a users/{autoId} doc and no
-//    login.
-//  - Every user has a unique reporting id (admin-chosen). codes/{uniqueId} is a
-//    public-by-id lookup mapping that id to the user and the questionnaires
-//    assigned to them, so an employee can report by typing only their id.
+// Hierarchy (Stage B): every department stores a materialized `path` (its
+// ancestor ids, root-first, including itself). Dept-scoped records copy that
+// as `deptPath`. A department head may act on any record whose deptPath
+// contains their own department id — i.e. their own department and every
+// sub-department beneath it. Admins can do everything.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -27,9 +24,6 @@ service cloud.firestore {
     function isDeptHead() { return hasProfile() && me().role == 'dept_head'; }
     function isManager() { return isAdmin() || isDeptHead(); }
     function myDept() { return me().departmentId; }
-    function deptOf(uid) {
-      return get(/databases/$(database)/documents/users/$(uid)).data.departmentId;
-    }
     function codeData(id) {
       return get(/databases/$(database)/documents/codes/$(id)).data;
     }
@@ -39,32 +33,34 @@ service cloud.firestore {
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
-    // Fields a task's assignee (or a report-by-code update) may change.
     function progressOnly() {
       return changedKeys().hasOnly(
         ['status', 'oneTimeStatus', 'pendingReason', 'completedDate', 'pendency', 'updatedAt']);
     }
+    // Admin, or a department head whose department is an ancestor of (or equal
+    // to) the record's department. `data` is resource.data or request.resource.data.
+    function scoped(data) {
+      return isAdmin() ||
+        (isDeptHead() && data.keys().hasAny(['deptPath']) && (myDept() in data.deptPath));
+    }
 
     // ---- users ----
-    // Login users are keyed by their auth uid, so a user can read their own doc.
-    // Report-only users are never read by rules (they don't sign in).
     match /users/{uid} {
-      allow read: if isSignedIn() && (
-        request.auth.uid == uid ||
-        isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept())
-      );
+      allow read: if isSignedIn() && (request.auth.uid == uid || scoped(resource.data));
+      // Heads may add employees or sub-heads anywhere in their subtree, but
+      // never admins.
       allow create: if isAdmin() || (
         isDeptHead() &&
-        request.resource.data.role == 'employee' &&
-        request.resource.data.departmentId == myDept()
+        request.resource.data.role != 'admin' &&
+        scoped(request.resource.data)
       );
-      allow update: if isAdmin() || (
-        request.auth.uid == uid &&
-        request.resource.data.role == resource.data.role &&
-        request.resource.data.departmentId == resource.data.departmentId
-      );
-      allow delete: if isAdmin() || (isDeptHead() && resource.data.departmentId == myDept());
+      allow update: if isAdmin() ||
+        (request.auth.uid == uid &&
+          request.resource.data.role == resource.data.role &&
+          request.resource.data.departmentId == resource.data.departmentId) ||
+        (isDeptHead() && scoped(resource.data) && scoped(request.resource.data) &&
+          request.resource.data.role != 'admin');
+      allow delete: if isAdmin() || (isDeptHead() && scoped(resource.data));
     }
 
     // ---- departments ----
@@ -74,48 +70,36 @@ service cloud.firestore {
     }
 
     // ---- questionnaires ----
-    // A single questionnaire is world-readable by exact id so the public code
-    // flow can load its questions; enumeration (list) stays manager-only.
     match /questionnaires/{id} {
       allow get: if true;
-      allow list: if isAdmin() || (isDeptHead() && resource.data.departmentId == myDept());
+      allow list: if scoped(resource.data);
       allow create: if isManager() &&
         request.resource.data.createdBy == request.auth.uid &&
-        (isAdmin() || request.resource.data.departmentId == myDept());
-      allow update, delete: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept()) ||
+        scoped(request.resource.data);
+      allow update, delete: if scoped(resource.data) ||
         (isSignedIn() && resource.data.createdBy == request.auth.uid);
     }
 
     // ---- codes ----  (doc id == the user's unique reporting id)
-    // Readable by exact id only (public reporting lookup); no enumeration.
     match /codes/{id} {
       allow get: if true;
       allow list: if false;
-      allow create: if isAdmin() ||
-        (isDeptHead() && request.resource.data.departmentId == myDept());
+      allow create: if scoped(request.resource.data);
       // Managers may manage the code doc; anyone may edit ONLY their own
       // personal schedule (the owner when logged in, or the report-by-code
       // holder when not) — restricted to the `scheduled` field.
-      allow update: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept()) ||
+      allow update: if scoped(resource.data) ||
         (changedKeys().hasOnly(['scheduled']) && (
           (request.auth != null && request.auth.uid == resource.data.userId) ||
           request.auth == null));
-      allow delete: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept());
+      allow delete: if scoped(resource.data);
     }
 
     // ---- assignments ----  (links a questionnaire to a user)
     match /assignments/{id} {
-      allow read: if isAdmin() || (isDeptHead() && resource.data.departmentId == myDept());
-      allow create: if isAdmin() || (
-        isDeptHead() &&
-        request.resource.data.departmentId == myDept() &&
-        deptOf(request.resource.data.userId) == myDept()
-      );
-      allow update, delete: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept());
+      allow read: if scoped(resource.data);
+      allow create: if scoped(request.resource.data);
+      allow update, delete: if scoped(resource.data);
     }
 
     // ---- submissions ----
@@ -123,58 +107,43 @@ service cloud.firestore {
     // payload matches a real code and an active assignment for that user.
     match /submissions/{id} {
       allow read: if isSignedIn() && (
-        isAdmin() ||
-        resource.data.userId == request.auth.uid ||
-        (isDeptHead() && resource.data.departmentId == myDept())
+        resource.data.userId == request.auth.uid || scoped(resource.data)
       );
       allow create: if
         request.resource.data.submittedAt == request.time &&
         request.resource.data.answers is list &&
         exists(/databases/$(database)/documents/codes/$(request.resource.data.uniqueId)) &&
         codeData(request.resource.data.uniqueId).userId == request.resource.data.userId &&
+        request.resource.data.deptPath == codeData(request.resource.data.uniqueId).deptPath &&
         exists(/databases/$(database)/documents/assignments/$(request.resource.data.assignmentId)) &&
         assignmentData(request.resource.data.assignmentId).active == true &&
         assignmentData(request.resource.data.assignmentId).userId == request.resource.data.userId &&
-        assignmentData(request.resource.data.assignmentId).questionnaireId == request.resource.data.questionnaireId &&
-        request.resource.data.departmentId == assignmentData(request.resource.data.assignmentId).departmentId;
+        assignmentData(request.resource.data.assignmentId).questionnaireId == request.resource.data.questionnaireId;
       allow update: if false;
       allow delete: if isAdmin();
     }
 
     // ---- tasks ----
-    // Readable by exact id so the public reporting flow can show a person's
-    // tasks; listing (dashboard) is limited to managers and the assignee.
     match /tasks/{id} {
       allow get: if true;
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept()) ||
-        resource.data.assignedTo == request.auth.uid
-      );
+      allow list: if scoped(resource.data) || (isSignedIn() && resource.data.assignedTo == request.auth.uid);
       allow create: if isManager() &&
         request.resource.data.assignedBy == request.auth.uid &&
-        (isAdmin() || (
-          request.resource.data.departmentId == myDept() &&
-          deptOf(request.resource.data.assignedTo) == myDept()
-        ));
-      // Managers edit freely. The assignee (logged in) or a report-by-code
-      // update (unauthenticated, gated on the task's code existing) may change
-      // only progress fields.
-      allow update: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept()) ||
-        (resource.data.assignedTo == request.auth.uid && progressOnly()) ||
+        scoped(request.resource.data);
+      // Managers (in scope) edit freely. The assignee (logged in) or a
+      // report-by-code update may change only progress fields.
+      allow update: if scoped(resource.data) ||
+        (isSignedIn() && resource.data.assignedTo == request.auth.uid && progressOnly()) ||
         (request.auth == null &&
           exists(/databases/$(database)/documents/codes/$(resource.data.assignedUniqueId)) &&
           progressOnly());
-      allow delete: if isAdmin() || (isDeptHead() && resource.data.departmentId == myDept());
+      allow delete: if scoped(resource.data);
     }
 
     // ---- taskUpdates ----  (append-only audit log of each change)
     match /taskUpdates/{id} {
       allow read: if isSignedIn() && (
-        isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept()) ||
-        resource.data.userId == request.auth.uid
+        resource.data.userId == request.auth.uid || scoped(resource.data)
       );
       allow create: if isSignedIn() ||
         (request.auth == null &&
