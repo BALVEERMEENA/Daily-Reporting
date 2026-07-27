@@ -198,5 +198,8 @@ tr:last-child td { border-bottom: none; }
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px; }
   #nav { order: 3; width: 100%; }
-  th:nth-child(n+4), td:nth-child(n+4) { display: none; }
+  /* Keep every column (including the Edit/Delete actions) reachable by making
+     wide tables scroll sideways instead of hiding columns. */
+  .page { overflow-x: hidden; }
+  table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
 }
