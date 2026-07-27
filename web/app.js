@@ -738,7 +738,8 @@ function questionnaireModal(existing) {
   const title = el('input', { value: existing ? existing.title : '', required: true });
   const desc = el('textarea', {}, existing ? existing.description || '' : '');
   const qWrap = el('div', {});
-  const addQ = (q = {}) => {
+  const addQ = (q = {}, { atTop = false } = {}) => {
+    const qid = q.id || 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     const item = el('div', { class: 'q-builder-item' });
     const text = el('input', { placeholder: 'Question text', value: q.text || '' });
     const type = el('select', {}, ...Q_TYPES.map(([v, l]) => el('option', { value: v, selected: q.type === v }, l)));
@@ -746,17 +747,22 @@ function questionnaireModal(existing) {
     const options = el('input', { placeholder: 'Options (comma separated)', value: (q.options || []).join(', ') });
     const toggle = () => { options.style.display = ['select', 'radio', 'checkbox'].includes(type.value) ? '' : 'none'; };
     type.addEventListener('change', toggle);
-    item.append(el('div', { class: 'q-row' }, text, el('button', { type: 'button', class: 'btn danger small', onclick: () => item.remove() }, '✕')),
+    const moveUp = el('button', { type: 'button', class: 'btn ghost small', title: 'Move up', onclick: () => { if (item.previousElementSibling) qWrap.insertBefore(item, item.previousElementSibling); } }, '▲');
+    const moveDown = el('button', { type: 'button', class: 'btn ghost small', title: 'Move down', onclick: () => { if (item.nextElementSibling) qWrap.insertBefore(item.nextElementSibling, item); } }, '▼');
+    item.append(el('div', { class: 'q-row' }, text, moveUp, moveDown, el('button', { type: 'button', class: 'btn danger small', title: 'Remove', onclick: () => item.remove() }, '✕')),
       el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required')), options);
     toggle();
-    item._get = () => ({ text: text.value.trim(), type: type.value, required: required.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
-    qWrap.append(item);
+    item._get = () => ({ id: qid, text: text.value.trim(), type: type.value, required: required.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
+    if (atTop && qWrap.firstChild) qWrap.insertBefore(item, qWrap.firstChild);
+    else qWrap.append(item);
   };
-  ((existing && existing.questions && existing.questions.length ? existing.questions : [{}])).forEach(addQ);
+  ((existing && existing.questions && existing.questions.length ? existing.questions : [{}])).forEach((q) => addQ(q));
   const content = el('div', {}, el('label', {}, 'Title', title), el('label', {}, 'Description', desc), el('label', {}, 'Questions'), qWrap,
-    el('button', { type: 'button', class: 'btn', onclick: () => addQ() }, '+ Add question'));
+    el('div', { class: 'inline' },
+      el('button', { type: 'button', class: 'btn', onclick: () => addQ({}, { atTop: true }) }, '+ Add at top'),
+      el('button', { type: 'button', class: 'btn', onclick: () => addQ() }, '+ Add at end')));
   modal(existing ? 'Edit questionnaire' : 'New questionnaire', content, async () => {
-    const questions = Array.from(qWrap.querySelectorAll('.q-builder-item')).map((n, i) => ({ ...n._get(), id: (existing && existing.questions && existing.questions[i] && existing.questions[i].id) || 'q' + (i + 1), position: i })).filter((q) => q.text);
+    const questions = Array.from(qWrap.querySelectorAll('.q-builder-item')).map((n, i) => ({ ...n._get(), position: i })).filter((q) => q.text);
     if (!questions.length) throw new Error('Add at least one question');
     if (existing) await updateDoc(doc(db, 'questionnaires', existing.id), { title: title.value.trim(), description: desc.value.trim(), questions });
     else await addDoc(colRef('questionnaires'), {
