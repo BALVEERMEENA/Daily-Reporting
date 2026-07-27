@@ -199,6 +199,13 @@ each record, so a head with department `D` can act on any record whose `deptPath
 contains `D`. **Records created before the hierarchy existed have no `deptPath`,
 so they won't roll up to a parent until re-saved** (admins still see them).
 
+**Membership rolls up:** a department "contains" everyone in it *and* all its
+sub-departments, so the Departments view shows the cumulative member count
+(with the direct count in brackets). A head also has admin-level rights **over
+their subtree's structure**: a **Sub-departments** page lets them create
+sub-departments under their branch, edit/delete the ones below them, and assign
+their heads — but never their own department, an ancestor, or a sibling.
+
 ### Questionnaire change approvals
 
 Editing or deleting a questionnaire that a department **owns** doesn't apply
