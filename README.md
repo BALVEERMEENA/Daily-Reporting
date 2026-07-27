@@ -198,6 +198,15 @@ Because there's no server seed, create the very first admin by hand:
   Unique ID covers every questionnaire they're assigned.
 - Anyone you gave a login to can also sign in to see their own past reports.
 
+### Personal schedule
+
+Every user has a private **My Schedule** planner for their own to-dos (separate
+from manager-assigned tasks). Add items with a date, time, priority and note;
+they group into **Overdue / Today / Upcoming / Done** and tick off when done.
+It's available on the dashboard (for users with a login) and in the reporting
+flow (enter Unique ID → *My schedule*), and is stored privately in the user's
+own code doc — only that user can read or change it.
+
 ### Tasks (with long-horizon pendency)
 
 Admins and department heads assign tasks to any user; each task shows up

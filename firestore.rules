@@ -94,8 +94,14 @@ service cloud.firestore {
       allow list: if false;
       allow create: if isAdmin() ||
         (isDeptHead() && request.resource.data.departmentId == myDept());
+      // Managers may manage the code doc; anyone may edit ONLY their own
+      // personal schedule (the owner when logged in, or the report-by-code
+      // holder when not) — restricted to the `scheduled` field.
       allow update: if isAdmin() ||
-        (isDeptHead() && resource.data.departmentId == myDept());
+        (isDeptHead() && resource.data.departmentId == myDept()) ||
+        (changedKeys().hasOnly(['scheduled']) && (
+          (request.auth != null && request.auth.uid == resource.data.userId) ||
+          request.auth == null));
       allow delete: if isAdmin() ||
         (isDeptHead() && resource.data.departmentId == myDept());
     }

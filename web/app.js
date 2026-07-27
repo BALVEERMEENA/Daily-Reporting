@@ -265,8 +265,14 @@ async function openReporter(uniqueId, codeData, container) {
   renderReporterQuestionnaires(uniqueId, codeData, qWrap);
   const taskCount = await renderReporterTasks(uniqueId, codeData, tWrap);
   if (!(codeData.questionnaires || []).length && !taskCount) {
-    container.append(el('p', { class: 'muted' }, 'Nothing has been assigned to you yet. Please check with your manager.'));
+    container.append(el('p', { class: 'muted' }, 'Nothing has been assigned to you yet — but you can still use your personal schedule below.'));
   }
+  // personal schedule (always available to the code holder)
+  const sWrap = el('div', {});
+  container.append(sWrap, el('hr'), el('h3', {}, 'My schedule'));
+  const sMount = el('div', {});
+  container.append(sMount);
+  renderScheduler(uniqueId, codeData.scheduled || [], sMount);
 }
 
 function renderReporterQuestionnaires(uniqueId, codeData, wrap) {
@@ -401,11 +407,11 @@ function fieldFor(q) {
  * Authenticated app shell
  * ------------------------------------------------------------------ */
 const PAGES = {
-  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks'],
-  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks'],
-  employee: ['tasks', 'reports'],
+  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'schedule'],
+  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'schedule'],
+  employee: ['tasks', 'reports', 'schedule'],
 };
-const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks' };
+const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', schedule: 'My Schedule' };
 
 function enterApp() {
   root().innerHTML = '';
@@ -435,6 +441,7 @@ const ROUTES = {
   dashboard: renderDashboard, departments: renderDepartments,
   users: () => renderUsers(false), team: () => renderUsers(true),
   questionnaires: renderQuestionnaires, reports: renderReports, tasks: renderTasks,
+  schedule: renderSchedule,
 };
 function navigate(page) {
   state.page = page;
@@ -869,6 +876,81 @@ function exportCsv(reports) {
   const url = URL.createObjectURL(blob);
   const link = el('a', { href: url, download: 'daily-reports.csv' });
   document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
+/* ---- Personal schedule (user-level planner, private to the user) ---- */
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+async function saveScheduler(uniqueId, items) {
+  await updateDoc(doc(db, 'codes', uniqueId), { scheduled: items });
+}
+/** Render the personal scheduler into `mount`. Items live in codes/{uniqueId}. */
+function renderScheduler(uniqueId, items, mount) {
+  let list = (items || []).slice();
+  const byDateTime = (a, b) => (String(a.date || '') + (a.time || '')).localeCompare(String(b.date || '') + (b.time || ''));
+  const persist = async (next, msg) => {
+    const prev = list;
+    list = next;
+    try { await saveScheduler(uniqueId, list); if (msg) toast(msg); rerender(); }
+    catch (e) { list = prev; toast(friendlyError(e), true); }
+  };
+  function itemRow(item) {
+    const cb = el('input', { type: 'checkbox', ...(item.done ? { checked: true } : {}),
+      onchange: () => persist(list.map((x) => x.id === item.id ? { ...x, done: cb.checked } : x)) });
+    const meta = [item.date, item.time, item.priority && item.priority !== 'normal' ? item.priority : null]
+      .filter(Boolean).join(' • ') + (item.note ? ' — ' + item.note : '');
+    return el('div', { class: 'q-builder-item', style: 'display:flex;align-items:center;gap:10px' + (item.done ? ';opacity:.55' : '') },
+      cb,
+      el('div', { style: 'flex:1' },
+        el('strong', item.done ? { style: 'text-decoration:line-through' } : {}, item.title),
+        meta ? el('div', { class: 'muted', style: 'font-size:12px' }, meta) : null),
+      el('button', { class: 'btn danger small', title: 'Delete', onclick: () => persist(list.filter((x) => x.id !== item.id), 'Removed') }, '✕'));
+  }
+  function rerender() {
+    mount.innerHTML = '';
+    // add form
+    const title = el('input', { placeholder: 'Task title' });
+    const date = el('input', { type: 'date', value: todayStr() });
+    const time = el('input', { type: 'time' });
+    const prio = el('select', {}, el('option', { value: 'normal' }, 'Normal'), el('option', { value: 'high' }, 'High'), el('option', { value: 'low' }, 'Low'));
+    const note = el('input', { placeholder: 'Note (optional)' });
+    const addBtn = el('button', { class: 'btn primary', style: 'width:auto', onclick: () => {
+      if (!title.value.trim()) { toast('Enter a task title', true); return; }
+      persist(list.concat([{ id: 's' + Date.now() + Math.random().toString(36).slice(2, 6), title: title.value.trim(), date: date.value || todayStr(), time: time.value || '', priority: prio.value, note: note.value.trim(), done: false, createdAt: new Date().toISOString() }]), 'Added');
+    } }, '+ Add');
+    mount.append(el('div', { class: 'q-builder-item' },
+      title,
+      el('div', { class: 'inline', style: 'margin-top:8px' },
+        el('label', { style: 'flex:1;margin:0' }, 'Date', date),
+        el('label', { style: 'flex:1;margin:0' }, 'Time', time),
+        el('label', { style: 'flex:1;margin:0' }, 'Priority', prio)),
+      el('div', { class: 'inline', style: 'margin-top:8px' }, el('div', { style: 'flex:1' }, note), addBtn)));
+    const today = todayStr();
+    const open = list.filter((i) => !i.done);
+    const done = list.filter((i) => i.done);
+    const overdue = open.filter((i) => i.date && i.date < today).sort(byDateTime);
+    const todays = open.filter((i) => i.date === today).sort(byDateTime);
+    const upcoming = open.filter((i) => !i.date || i.date > today).sort(byDateTime);
+    const group = (label, arr) => { if (!arr.length) return; mount.append(el('h4', { style: 'margin:16px 0 6px' }, label)); arr.forEach((it) => mount.append(itemRow(it))); };
+    group('⚠ Overdue', overdue);
+    group('Today', todays);
+    group('Upcoming', upcoming);
+    if (done.length) { mount.append(el('h4', { class: 'muted', style: 'margin:16px 0 6px' }, 'Done')); done.sort(byDateTime).forEach((it) => mount.append(itemRow(it))); }
+    if (!list.length) mount.append(el('p', { class: 'muted' }, 'No scheduled tasks yet. Add one above.'));
+  }
+  rerender();
+}
+
+async function renderSchedule() {
+  await withPage(async () => {
+    const uid = state.user.uniqueId;
+    const head = pageHead('My Schedule');
+    if (!uid) return [head, el('div', { class: 'empty' }, 'Your account has no Unique ID, so there is no personal schedule. An admin can set one on your user.')];
+    const snap = await getDoc(doc(db, 'codes', uid));
+    const items = snap.exists() ? (snap.data().scheduled || []) : [];
+    const mount = el('div', {});
+    renderScheduler(uid, items, mount);
+    return [head, mount];
+  });
 }
 
 /* ---- Tasks ---- */
