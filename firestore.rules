@@ -71,9 +71,22 @@ service cloud.firestore {
     }
 
     // ---- departments ----
+    // Admins manage the whole tree. A department head has admin-level rights
+    // *within their subtree*: they may create sub-departments under it and
+    // edit/delete departments strictly below their own (never their own
+    // department or an ancestor, and never move one out of the subtree).
     match /departments/{id} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow create: if isAdmin() ||
+        (isDeptHead() && request.resource.data.keys().hasAny(['path']) &&
+          (myDept() in request.resource.data.path));
+      allow update: if isAdmin() ||
+        (isDeptHead() && id != myDept() &&
+          resource.data.keys().hasAny(['path']) && (myDept() in resource.data.path) &&
+          request.resource.data.keys().hasAny(['path']) && (myDept() in request.resource.data.path));
+      allow delete: if isAdmin() ||
+        (isDeptHead() && id != myDept() &&
+          resource.data.keys().hasAny(['path']) && (myDept() in resource.data.path));
     }
 
     // ---- questionnaires ----

@@ -410,7 +410,7 @@ function fieldFor(q) {
  * ------------------------------------------------------------------ */
 const PAGES = {
   admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
-  dept_head: ['dashboard', 'team', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
+  dept_head: ['dashboard', 'team', 'departments', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
   employee: ['tasks', 'reports', 'schedule'],
 };
 const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', pendency: 'Pendency', approvals: 'Approvals', schedule: 'My Schedule' };
@@ -536,47 +536,63 @@ function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t)
 async function renderDepartments() {
   await withPage(async () => {
     const [departments, users] = await Promise.all([listDepartments(), listUsers()]);
-    // order as a tree: sort by path so ancestors precede descendants
     const paths = computePaths(departments);
-    const ordered = departments.slice().sort((a, b) =>
+    const isHead = state.user.role === 'dept_head';
+    // a head sees/manages only their own subtree
+    const inScope = (d) => !isHead || (paths[d.id] || []).includes(state.user.departmentId);
+    const visible = departments.filter(inScope);
+    const ordered = visible.slice().sort((a, b) =>
       (paths[a.id] || []).map((id) => deptName(departments, id)).join('/').localeCompare(
         (paths[b.id] || []).map((id) => deptName(departments, id)).join('/')));
-    const head = pageHead('Departments', [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => departmentModal(null, users, departments) }, '+ New department')]);
-    if (!departments.length) return [head, el('div', { class: 'empty' }, 'No departments yet. The first one is your top-level branch.')];
+    const head = pageHead(isHead ? 'Sub-departments' : 'Departments',
+      [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => departmentModal(null, users, departments) }, isHead ? '+ New sub-department' : '+ New department')]);
+    if (!visible.length) return [head, el('div', { class: 'empty' }, isHead ? 'No sub-departments yet. Add one under your department.' : 'No departments yet. The first one is your top-level branch.')];
     const tbody = el('tbody');
+    // members roll up: a department "contains" everyone in its subtree
+    const totalMembers = (id) => users.filter((u) => (u.deptPath || []).includes(id)).length;
+    const directMembers = (id) => users.filter((u) => u.departmentId === id).length;
     ordered.forEach((d) => {
       const depth = (paths[d.id] || [d.id]).length - 1;
-      const memberCount = users.filter((u) => u.departmentId === d.id).length;
+      const total = totalMembers(d.id); const direct = directMembers(d.id);
+      const membersLabel = total === direct ? String(total) : `${total} (${direct} direct)`;
       const headName = (users.find((u) => u.id === d.headUserId) || {}).name || '—';
       const label = (depth ? '—'.repeat(depth) + ' ' : '') + d.name;
+      const canManage = state.user.role === 'admin' || d.id !== state.user.departmentId; // heads can't edit their own dept
       tbody.append(el('tr', {},
         el('td', {}, el('span', depth ? { class: 'muted' } : {}, label), depth ? null : el('span', { class: 'pill dept_head', style: 'margin-left:8px' }, 'branch')),
-        el('td', {}, headName), el('td', {}, String(memberCount)),
+        el('td', {}, headName), el('td', {}, membersLabel),
         el('td', {}, el('div', { class: 'row-actions' },
-          el('button', { class: 'btn ghost small', onclick: () => departmentModal(d, users, departments) }, 'Edit'),
-          el('button', { class: 'btn danger small', onclick: () => delDepartment(d, users, departments) }, 'Delete')))));
+          canManage ? el('button', { class: 'btn ghost small', onclick: () => departmentModal(d, users, departments) }, 'Edit') : null,
+          canManage ? el('button', { class: 'btn danger small', onclick: () => delDepartment(d, users, departments) }, 'Delete') : null))));
     });
-    return [head, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Department'), el('th', {}, 'Head'), el('th', {}, 'Members'), el('th', {}, ''))), tbody)];
+    return [head,
+      el('p', { class: 'muted', style: 'margin:0 0 12px' }, 'Members count includes everyone in the department and all its sub-departments.'),
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Department'), el('th', {}, 'Head'), el('th', {}, 'Members'), el('th', {}, ''))), tbody)];
   });
 }
 
 function departmentModal(dept, users, departments) {
+  const isHead = state.user.role === 'dept_head';
   const name = el('input', { value: dept ? dept.name : '', required: true });
-  // a department cannot be its own parent or a child of its own descendants
   const paths = computePaths(departments);
+  // a department cannot be its own parent or a child of its own descendants
   const descendantIds = dept ? new Set(departments.filter((x) => (paths[x.id] || []).includes(dept.id)).map((x) => x.id)) : new Set();
-  const parentOptions = departments.filter((x) => !descendantIds.has(x.id));
-  const parent = el('select', {}, el('option', { value: '' }, '— none (top-level branch) —'),
-    ...parentOptions.map((p) => el('option', { value: p.id, selected: dept && dept.parentId === p.id }, p.name)));
+  let parentOptions = departments.filter((x) => !descendantIds.has(x.id));
+  // a head can only place departments within their own subtree
+  if (isHead) parentOptions = parentOptions.filter((x) => (paths[x.id] || []).includes(state.user.departmentId));
+  const parent = el('select', {},
+    ...(isHead ? [] : [el('option', { value: '' }, '— none (top-level branch) —')]),
+    ...parentOptions.map((p) => el('option', { value: p.id, selected: (dept && dept.parentId === p.id) || (!dept && isHead && p.id === state.user.departmentId) }, p.name)));
   const head = el('select', {}, el('option', { value: '' }, '— none —'),
     ...users.filter((u) => u.authUid).map((u) => el('option', { value: u.id, selected: dept && dept.headUserId === u.id }, `${u.name} (${u.email || u.uniqueId})`)));
-  modal(dept ? 'Edit department' : 'New department',
+  modal(dept ? 'Edit department' : (isHead ? 'New sub-department' : 'New department'),
     el('div', {},
       el('label', {}, 'Name', name),
       el('label', {}, 'Parent department', parent),
       el('label', {}, 'Department head (must have a login)', head)), async () => {
       const headId = head.value || null;
       const parentId = parent.value || null;
+      if (isHead && !parentId) throw new Error('Choose a parent department within your branch.');
       const ref = dept ? doc(db, 'departments', dept.id) : doc(colRef('departments'));
       const id = dept ? dept.id : ref.id;
       // rebuild the whole tree's paths with this department's new parent
