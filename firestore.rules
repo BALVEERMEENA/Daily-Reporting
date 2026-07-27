@@ -39,6 +39,11 @@ service cloud.firestore {
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
+    // Fields a task's assignee (or a report-by-code update) may change.
+    function progressOnly() {
+      return changedKeys().hasOnly(
+        ['status', 'oneTimeStatus', 'pendingReason', 'completedDate', 'pendency', 'updatedAt']);
+    }
 
     // ---- users ----
     // Login users are keyed by their auth uid, so a user can read their own doc.
@@ -131,11 +136,14 @@ service cloud.firestore {
     }
 
     // ---- tasks ----
+    // Readable by exact id so the public reporting flow can show a person's
+    // tasks; listing (dashboard) is limited to managers and the assignee.
     match /tasks/{id} {
-      allow read: if isSignedIn() && (
+      allow get: if true;
+      allow list: if isSignedIn() && (
         isAdmin() ||
-        resource.data.assignedTo == request.auth.uid ||
-        (isDeptHead() && resource.data.departmentId == myDept())
+        (isDeptHead() && resource.data.departmentId == myDept()) ||
+        resource.data.assignedTo == request.auth.uid
       );
       allow create: if isManager() &&
         request.resource.data.assignedBy == request.auth.uid &&
@@ -143,10 +151,30 @@ service cloud.firestore {
           request.resource.data.departmentId == myDept() &&
           deptOf(request.resource.data.assignedTo) == myDept()
         ));
+      // Managers edit freely. The assignee (logged in) or a report-by-code
+      // update (unauthenticated, gated on the task's code existing) may change
+      // only progress fields.
       allow update: if isAdmin() ||
         (isDeptHead() && resource.data.departmentId == myDept()) ||
-        (resource.data.assignedTo == request.auth.uid && changedKeys().hasOnly(['status']));
+        (resource.data.assignedTo == request.auth.uid && progressOnly()) ||
+        (request.auth == null &&
+          exists(/databases/$(database)/documents/codes/$(resource.data.assignedUniqueId)) &&
+          progressOnly());
       allow delete: if isAdmin() || (isDeptHead() && resource.data.departmentId == myDept());
+    }
+
+    // ---- taskUpdates ----  (append-only audit log of each change)
+    match /taskUpdates/{id} {
+      allow read: if isSignedIn() && (
+        isAdmin() ||
+        (isDeptHead() && resource.data.departmentId == myDept()) ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isSignedIn() ||
+        (request.auth == null &&
+          exists(/databases/$(database)/documents/codes/$(request.resource.data.uniqueId)));
+      allow update: if false;
+      allow delete: if isAdmin();
     }
 
     // ---- notifications ----

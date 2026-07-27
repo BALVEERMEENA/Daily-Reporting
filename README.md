@@ -198,6 +198,23 @@ Because there's no server seed, create the very first admin by hand:
   Unique ID covers every questionnaire they're assigned.
 - Anyone you gave a login to can also sign in to see their own past reports.
 
+### Tasks (with long-horizon pendency)
+
+Admins and department heads assign tasks to any user; each task shows up
+automatically in that person's reporting flow (by Unique ID) and, if they have
+a login, on their dashboard. Two kinds:
+
+- **One-time** — the person marks it **Completed** (records the date and closes
+  it) or **Still pending** (with a reason).
+- **Quantity / pendency** — for long-horizon backlogs. The task has an optional
+  horizon (e.g. 15 days) and a starting pending count. Each day the person
+  enters what they **Completed** and what was **Newly added**, and the running
+  pending recalculates as `previous − completed + added`, carried forward and
+  shown on the next report. It auto-closes when pending reaches 0.
+
+Every change is written to an audit log, so managers can open a task's
+**History** to see the day-by-day completed/added/pending trail.
+
 ### Automated deploy from GitHub (no command line)
 
 For a phone-only / no-PC workflow, `.github/workflows/firebase-deploy.yml`
