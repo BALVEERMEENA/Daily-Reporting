@@ -336,7 +336,7 @@ async function loadReportForm(uniqueId, codeData, entry, container) {
 function renderReportForm(uniqueId, codeData, entry, qn, container) {
   container.innerHTML = '';
   const form = el('form', {});
-  form.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)), el('h2', {}, qn.title),
+  form.append(el('h2', {}, qn.title),
     qn.description ? el('p', { class: 'muted' }, qn.description) : null);
   const questions = (qn.questions || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0));
   const inputs = [];
