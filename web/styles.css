@@ -203,3 +203,14 @@ tr:last-child td { border-bottom: none; }
   .page { overflow-x: hidden; }
   table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
 }
+
+/* In-form question table: multiple values per question (rows x columns) */
+.qtable { width: 100%; border-collapse: collapse; box-shadow: none; display: table; white-space: normal; }
+.qtable th, .qtable td { border: 1px solid var(--line); }
+.qtable th { background: #f8fafc; padding: 8px 10px; text-align: left; font-size: 13px; color: var(--ink); text-transform: none; letter-spacing: 0; white-space: normal; }
+.qtable thead tr:first-child th { font-weight: 700; }
+.qtable td { padding: 0; }
+.qtable td input { border: none; border-radius: 0; width: 100%; background: transparent; padding: 8px 10px; margin: 0; }
+.qtable td input:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
+.qtable th:last-child, .qtable td:last-child { width: 40px; text-align: center; padding: 0; }
+.qtable td:last-child .btn { margin: 4px auto; }
