@@ -402,23 +402,28 @@ function fieldFor(q) {
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
   } else if (q.type === 'table') {
-    // Multiple values per question: columns are defined in q.options; the
-    // respondent can add one or more rows.
+    // Multiple values per question, rendered as a grid: the question title
+    // spans the top, then a header row of the columns (q.options), then one or
+    // more input rows.
+    label.textContent = '';
+    label.style.fontWeight = '400';
     const cols = opts.length ? opts : ['Value'];
-    const rowsWrap = el('div', {});
+    const tbody = el('tbody');
     const makeRow = () => {
-      const inputs = cols.map((c) => el('input', { placeholder: c, style: 'flex:1;min-width:80px' }));
-      const row = el('div', { class: 'inline', style: 'gap:6px;margin-bottom:6px' }, ...inputs,
-        el('button', { type: 'button', class: 'btn danger small', title: 'Remove row', onclick: () => row.remove() }, '✕'));
-      row._cells = () => inputs.map((inp, i) => [cols[i], inp.value.trim()]);
-      rowsWrap.append(row);
+      const inputs = cols.map((c) => el('input', { placeholder: c }));
+      const tr = el('tr', {}, ...inputs.map((i) => el('td', {}, i)),
+        el('td', {}, el('button', { type: 'button', class: 'btn danger small', title: 'Remove row', onclick: () => tr.remove() }, '✕')));
+      tr._cells = () => inputs.map((inp, i) => [cols[i], inp.value.trim()]);
+      tbody.append(tr);
     };
     makeRow();
-    label.append(
-      el('div', { class: 'muted', style: 'font-size:12px;margin:2px 0 6px' }, cols.join(' · ')),
-      rowsWrap,
-      el('button', { type: 'button', class: 'btn small', onclick: makeRow }, '+ Add row'));
-    getter = () => Array.from(rowsWrap.children)
+    const table = el('table', { class: 'qtable' },
+      el('thead', {},
+        el('tr', {}, el('th', { colspan: String(cols.length + 1) }, q.text + (q.required ? ' *' : ''))),
+        el('tr', {}, ...cols.map((c) => el('th', {}, c)), el('th', {}, ''))),
+      tbody);
+    label.append(table, el('button', { type: 'button', class: 'btn small', style: 'margin-top:6px', onclick: makeRow }, '+ Add row'));
+    getter = () => Array.from(tbody.children)
       .map((r) => r._cells())
       .filter((cells) => cells.some(([, v]) => v !== ''))
       .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '))
