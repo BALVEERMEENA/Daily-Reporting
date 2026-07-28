@@ -401,6 +401,28 @@ function fieldFor(q) {
     const w = el('div', { class: 'checkbox-list' });
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
+  } else if (q.type === 'table') {
+    // Multiple values per question: columns are defined in q.options; the
+    // respondent can add one or more rows.
+    const cols = opts.length ? opts : ['Value'];
+    const rowsWrap = el('div', {});
+    const makeRow = () => {
+      const inputs = cols.map((c) => el('input', { placeholder: c, style: 'flex:1;min-width:80px' }));
+      const row = el('div', { class: 'inline', style: 'gap:6px;margin-bottom:6px' }, ...inputs,
+        el('button', { type: 'button', class: 'btn danger small', title: 'Remove row', onclick: () => row.remove() }, '✕'));
+      row._cells = () => inputs.map((inp, i) => [cols[i], inp.value.trim()]);
+      rowsWrap.append(row);
+    };
+    makeRow();
+    label.append(
+      el('div', { class: 'muted', style: 'font-size:12px;margin:2px 0 6px' }, cols.join(' · ')),
+      rowsWrap,
+      el('button', { type: 'button', class: 'btn small', onclick: makeRow }, '+ Add row'));
+    getter = () => Array.from(rowsWrap.children)
+      .map((r) => r._cells())
+      .filter((cells) => cells.some(([, v]) => v !== ''))
+      .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '))
+      .join('\n');
   } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
   return { node: label, get: getter };
 }
@@ -736,7 +758,7 @@ async function delUser(u) {
 }
 
 /* ---- Questionnaires ---- */
-const Q_TYPES = [['text', 'Short text'], ['textarea', 'Long text'], ['number', 'Number'], ['date', 'Date'], ['select', 'Dropdown'], ['radio', 'Single choice'], ['checkbox', 'Multiple choice']];
+const Q_TYPES = [['text', 'Short text'], ['textarea', 'Long text'], ['number', 'Number'], ['date', 'Date'], ['select', 'Dropdown'], ['radio', 'Single choice'], ['checkbox', 'Multiple choice'], ['table', 'Table (multiple rows)']];
 
 // Can the current user edit/delete this questionnaire directly (admin or a
 // strict superior of its department)? Otherwise changes go through approval.
@@ -841,7 +863,11 @@ async function questionnaireModal(existing) {
     const type = el('select', {}, ...Q_TYPES.map(([v, l]) => el('option', { value: v, selected: q.type === v }, l)));
     const required = el('input', { type: 'checkbox', ...(q.required ? { checked: true } : {}) });
     const options = el('input', { placeholder: 'Options (comma separated)', value: (q.options || []).join(', ') });
-    const toggle = () => { options.style.display = ['select', 'radio', 'checkbox'].includes(type.value) ? '' : 'none'; };
+    const toggle = () => {
+      const show = ['select', 'radio', 'checkbox', 'table'].includes(type.value);
+      options.style.display = show ? '' : 'none';
+      options.placeholder = type.value === 'table' ? 'Columns, e.g. Number of leads, Amount' : 'Options (comma separated)';
+    };
     type.addEventListener('change', toggle);
     const moveUp = el('button', { type: 'button', class: 'btn ghost small', title: 'Move up', onclick: () => { if (item.previousElementSibling) qWrap.insertBefore(item, item.previousElementSibling); } }, '▲');
     const moveDown = el('button', { type: 'button', class: 'btn ghost small', title: 'Move down', onclick: () => { if (item.nextElementSibling) qWrap.insertBefore(item.nextElementSibling, item); } }, '▼');
