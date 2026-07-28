@@ -979,15 +979,127 @@ async function manageAssignments(q) {
   refreshSelect(); renderList();
 }
 
-/* ---- Reports ---- */
+/* ---- Reports & analytics ---- */
+function localYmd(d = new Date()) { const off = d.getTimezoneOffset() * 60000; return new Date(d - off).toISOString().slice(0, 10); }
+function submittedYmd(r) { const d = r.submittedAt && r.submittedAt.toDate ? r.submittedAt.toDate() : (r.submittedAt ? new Date(r.submittedAt) : null); return d ? localYmd(d) : ''; }
+async function listAssignments() { return state.user.role === 'admin' ? getAll('assignments') : getSubtree('assignments'); }
+const toNum = (s) => { const n = parseFloat(String(s).replace(/,/g, '').trim()); return isNaN(n) ? null : n; };
+// Pull numeric metrics out of answers: a plain Number answer, or each numeric
+// "Column: value" pair inside a Table answer.
+function reportMetrics(reports) {
+  const map = {};
+  const add = (key, n) => { (map[key] || (map[key] = { sum: 0, count: 0 })); map[key].sum += n; map[key].count += 1; };
+  reports.forEach((r) => (r.answers || []).forEach((a) => {
+    const v = (a.value == null ? '' : String(a.value)).trim();
+    if (!v) return;
+    const parts = v.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    let pair = false;
+    parts.forEach((p) => { const m = p.match(/^(.+?):\s*(.+)$/); if (m) { const n = toNum(m[2]); if (n !== null) { pair = true; add(`${a.question} — ${m[1].trim()}`, n); } } });
+    if (!pair) { const n = toNum(v); if (n !== null) add(a.question, n); }
+  }));
+  return map;
+}
+const fmtNum = (n) => (Math.round(n * 100) / 100).toLocaleString();
+
 async function renderReports() {
   await withPage(async () => {
-    const reports = await listReports();
     const isEmployee = state.user.role === 'employee';
-    const actions = isEmployee ? [] : [el('button', { class: 'btn', style: 'width:auto', onclick: () => exportCsv(reports) }, '⭳ Export CSV')];
-    const head = pageHead(isEmployee ? 'My Reports' : 'Reports', actions);
+    const [reports, assignments, users, departments] = await Promise.all([
+      listReports(),
+      isEmployee ? Promise.resolve([]) : listAssignments().catch(() => []),
+      isEmployee ? Promise.resolve([]) : listUsers().catch(() => []),
+      isEmployee ? Promise.resolve([]) : listDepartments().catch(() => []),
+    ]);
+    const nameById = Object.fromEntries(users.map((u) => [u.id, u.name]));
+
+    // filter options derived from the data
+    const qOpts = [...new Map(reports.map((r) => [r.questionnaireId, r.questionnaireTitle])).entries()];
+    const uOpts = [...new Map(reports.map((r) => [r.userId, r.userName])).entries()];
+
+    const f = { from: '', to: '', questionnaireId: '', userId: '', departmentId: '' };
+    let filtered = reports;
+
+    const exportBtn = el('button', { class: 'btn', style: 'width:auto', onclick: () => exportCsv(filtered) }, '⭳ Export CSV');
+    const head = pageHead(isEmployee ? 'My Reports' : 'Reports', reports.length ? [exportBtn] : []);
     if (!reports.length) return [head, el('div', { class: 'empty' }, isEmployee ? 'You have not submitted any reports yet.' : 'No reports submitted yet.')];
-    return [head, reportsTable(reports)];
+
+    const fromI = el('input', { type: 'date' });
+    const toI = el('input', { type: 'date' });
+    const qSel = el('select', {}, el('option', { value: '' }, 'All questionnaires'), ...qOpts.map(([id, t]) => el('option', { value: id }, t)));
+    const uSel = el('select', {}, el('option', { value: '' }, 'All people'), ...uOpts.map(([id, n]) => el('option', { value: id }, n)));
+    const dSel = el('select', {}, el('option', { value: '' }, 'All departments'), ...departments.map((d) => el('option', { value: d.id }, d.name)));
+    const setPreset = (days) => { toI.value = localYmd(); fromI.value = days == null ? '' : localYmd(new Date(Date.now() - days * 86400000)); if (days === null) toI.value = ''; sync(); };
+    const presets = el('div', { class: 'inline', style: 'gap:6px' },
+      el('button', { class: 'btn ghost small', onclick: () => setPreset(0) }, 'Today'),
+      el('button', { class: 'btn ghost small', onclick: () => setPreset(6) }, '7 days'),
+      el('button', { class: 'btn ghost small', onclick: () => setPreset(29) }, '30 days'),
+      el('button', { class: 'btn ghost small', onclick: () => setPreset(null) }, 'All'));
+
+    const filterBar = el('div', { class: 'tile', style: 'margin-bottom:14px' },
+      presets,
+      el('div', { class: 'inline', style: 'margin-top:10px' },
+        el('label', { style: 'flex:1;margin:0' }, 'From', fromI),
+        el('label', { style: 'flex:1;margin:0' }, 'To', toI)),
+      el('div', { class: 'inline', style: 'margin-top:10px' },
+        el('label', { style: 'flex:1;margin:0' }, 'Questionnaire', qSel),
+        isEmployee ? null : el('label', { style: 'flex:1;margin:0' }, 'Person', uSel),
+        isEmployee ? null : el('label', { style: 'flex:1;margin:0' }, 'Department', dSel)));
+
+    const results = el('div', {});
+
+    function sync() {
+      f.from = fromI.value; f.to = toI.value; f.questionnaireId = qSel.value; f.userId = uSel.value; f.departmentId = dSel.value;
+      const fromMs = f.from ? new Date(f.from + 'T00:00:00').getTime() : -Infinity;
+      const toMs = f.to ? new Date(f.to + 'T23:59:59').getTime() : Infinity;
+      filtered = reports.filter((r) => {
+        const ms = millis(r.submittedAt);
+        if (ms < fromMs || ms > toMs) return false;
+        if (f.questionnaireId && r.questionnaireId !== f.questionnaireId) return false;
+        if (f.userId && r.userId !== f.userId) return false;
+        if (f.departmentId && !(r.deptPath || []).includes(f.departmentId)) return false;
+        return true;
+      });
+      renderResults();
+    }
+
+    function renderResults() {
+      results.innerHTML = '';
+      const uniqueReporters = new Set(filtered.map((r) => r.userId)).size;
+      const tiles = [tile('Reports', filtered.length, 'in filter'), tile('People reporting', uniqueReporters, 'unique')];
+
+      // daily coverage (managers): who was assigned but hasn't reported today
+      if (!isEmployee && assignments.length) {
+        const today = localYmd();
+        const assignedIds = [...new Set(assignments.map((a) => a.userId))];
+        const reportedToday = new Set(reports.filter((r) => submittedYmd(r) === today).map((r) => r.userId));
+        const missing = assignedIds.filter((id) => !reportedToday.has(id));
+        tiles.push(tile('Reported today', `${assignedIds.length - missing.length}/${assignedIds.length}`, 'of assigned'));
+        results.append(el('div', { class: 'grid' }, ...tiles));
+        if (missing.length) {
+          results.append(el('details', { style: 'margin:12px 0' },
+            el('summary', { style: 'cursor:pointer;color:var(--warn);font-weight:600' }, `${missing.length} not reported today`),
+            el('div', { class: 'muted', style: 'padding:8px 0' }, missing.map((id) => nameById[id] || id).join(', '))));
+        }
+      } else {
+        results.append(el('div', { class: 'grid' }, ...tiles));
+      }
+
+      // numeric totals
+      const metrics = reportMetrics(filtered);
+      const keys = Object.keys(metrics).sort();
+      if (keys.length) {
+        const tbody = el('tbody');
+        keys.forEach((k) => { const m = metrics[k]; tbody.append(el('tr', {}, el('td', {}, k), el('td', {}, el('strong', {}, fmtNum(m.sum))), el('td', {}, fmtNum(m.sum / m.count)), el('td', {}, String(m.count)))); });
+        results.append(el('h3', { style: 'margin-top:20px' }, 'Totals'),
+          el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Metric'), el('th', {}, 'Total'), el('th', {}, 'Average'), el('th', {}, 'Entries'))), tbody));
+      }
+
+      results.append(el('h3', { style: 'margin-top:20px' }, `Reports (${filtered.length})`), reportsTable(filtered));
+    }
+
+    [fromI, toI, qSel, uSel, dSel].forEach((c) => c.addEventListener('change', sync));
+    renderResults();
+    return [head, filterBar, results];
   });
 }
 function reportsTable(reports) {
