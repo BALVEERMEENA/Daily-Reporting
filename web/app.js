@@ -402,32 +402,23 @@ function fieldFor(q) {
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
   } else if (q.type === 'table') {
-    // Multiple values per question, rendered as a grid: the question title
-    // spans the top, then a header row of the columns (q.options), then one or
-    // more input rows.
+    // Several fields for one question, rendered as a grid: the title spans the
+    // top, the columns (q.options) form a header row, and there is one input row.
     label.textContent = '';
     label.style.fontWeight = '400';
     const cols = opts.length ? opts : ['Value'];
-    const tbody = el('tbody');
-    const makeRow = () => {
-      const inputs = cols.map((c) => el('input', { placeholder: c }));
-      const tr = el('tr', {}, ...inputs.map((i) => el('td', {}, i)),
-        el('td', {}, el('button', { type: 'button', class: 'btn danger small', title: 'Remove row', onclick: () => tr.remove() }, '✕')));
-      tr._cells = () => inputs.map((inp, i) => [cols[i], inp.value.trim()]);
-      tbody.append(tr);
-    };
-    makeRow();
+    const inputs = cols.map((c) => el('input', { placeholder: c }));
     const table = el('table', { class: 'qtable' },
       el('thead', {},
-        el('tr', {}, el('th', { colspan: String(cols.length + 1) }, q.text + (q.required ? ' *' : ''))),
-        el('tr', {}, ...cols.map((c) => el('th', {}, c)), el('th', {}, ''))),
-      tbody);
-    label.append(table, el('button', { type: 'button', class: 'btn small', style: 'margin-top:6px', onclick: makeRow }, '+ Add row'));
-    getter = () => Array.from(tbody.children)
-      .map((r) => r._cells())
-      .filter((cells) => cells.some(([, v]) => v !== ''))
-      .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '))
-      .join('\n');
+        el('tr', {}, el('th', { colspan: String(cols.length) }, q.text + (q.required ? ' *' : ''))),
+        el('tr', {}, ...cols.map((c) => el('th', {}, c)))),
+      el('tbody', {}, el('tr', {}, ...inputs.map((i) => el('td', {}, i)))));
+    label.append(table);
+    getter = () => {
+      const cells = inputs.map((inp, i) => [cols[i], inp.value.trim()]);
+      if (cells.every(([, v]) => v === '')) return '';
+      return cells.map(([c, v]) => `${c}: ${v}`).join(', ');
+    };
   } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
   return { node: label, get: getter };
 }
