@@ -212,3 +212,5 @@ tr:last-child td { border-bottom: none; }
 .qtable td { padding: 0; }
 .qtable td input { border: none; border-radius: 0; width: 100%; background: transparent; padding: 8px 10px; margin: 0; }
 .qtable td input:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
+.qtable td.qtable-x { padding: 4px 6px; text-align: center; width: 1%; white-space: nowrap; }
+.qtable td.qtable-x .btn { padding: 4px 8px; }
