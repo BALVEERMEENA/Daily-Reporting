@@ -260,9 +260,11 @@ function renderLogin() {
 async function openReporter(uniqueId, codeData, container) {
   container.innerHTML = '';
   container.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)));
+  const oWrap = el('div', {});
   const qWrap = el('div', {});
   const tWrap = el('div', {});
-  container.append(qWrap, tWrap);
+  container.append(oWrap, qWrap, tWrap);
+  renderReporterObservations(uniqueId, codeData, oWrap);
   renderReporterQuestionnaires(uniqueId, codeData, qWrap);
   const taskCount = await renderReporterTasks(uniqueId, codeData, tWrap);
   if (!(codeData.questionnaires || []).length && !taskCount) {
@@ -274,6 +276,42 @@ async function openReporter(uniqueId, codeData, container) {
   const sMount = el('div', {});
   container.append(sMount);
   renderScheduler(uniqueId, codeData.scheduled || [], sMount);
+}
+
+/** Show manager observations to the reporter and let them reply. Stored on the
+ *  code doc so the (anonymous) reporter can read and append a reply. */
+function renderReporterObservations(uniqueId, codeData, wrap) {
+  let obs = (codeData.observations || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+  if (!obs.length) return;
+  const box = el('div', {});
+  wrap.append(box);
+  const rebuild = () => {
+    box.innerHTML = '';
+    box.append(el('h3', {}, '📣 Feedback from your manager'));
+    obs.forEach((o) => {
+      const card = el('div', { class: 'card', style: 'background:#fffbeb;border:1px solid #fde68a;padding:12px;margin-bottom:10px' });
+      card.append(
+        el('div', { style: 'font-weight:600' }, o.message),
+        el('div', { class: 'muted', style: 'font-size:12px;margin:4px 0' }, `${o.fromName || 'Manager'}${o.at ? ' · ' + String(o.at).slice(0, 10) : ''}`));
+      if (o.reply) {
+        card.append(el('div', { style: 'margin-top:6px' }, el('span', { class: 'muted' }, 'Your reply: '), o.reply));
+      } else {
+        const ta = el('textarea', { placeholder: 'Reply to this observation…' });
+        const btn = el('button', { class: 'btn small', style: 'margin-top:6px', onclick: async () => {
+          const text = ta.value.trim(); if (!text) return;
+          btn.disabled = true;
+          try {
+            obs = obs.map((x) => x.id === o.id ? { ...x, reply: text, replyAt: new Date().toISOString() } : x);
+            await updateDoc(doc(db, 'codes', uniqueId), { observations: obs });
+            codeData.observations = obs; toast('Reply sent'); rebuild();
+          } catch (e) { btn.disabled = false; toast(friendlyError(e), true); }
+        } }, 'Send reply');
+        card.append(ta, btn);
+      }
+      box.append(card);
+    });
+  };
+  rebuild();
 }
 
 function renderReporterQuestionnaires(uniqueId, codeData, wrap) {
@@ -401,6 +439,10 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
       if (q.required && empty) { errBox.textContent = `"${q.text}" is required.`; return; }
     }
     btn.disabled = true;
+    const answers = inputs.map(({ q, get }) => ({
+      questionId: q.id, question: q.text,
+      value: Array.isArray(get()) ? get().join(', ') : String(get()),
+    }));
     try {
       await setDoc(doc(db, 'submissions', subId(date)), {
         uniqueId,
@@ -412,17 +454,15 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
         departmentId: codeData.departmentId ?? null,
         deptPath: codeData.deptPath ?? null,
         reportDate: date,
-        answers: inputs.map(({ q, get }) => ({
-          questionId: q.id, question: q.text,
-          value: Array.isArray(get()) ? get().join(', ') : String(get()),
-        })),
+        answers,
         submittedAt: serverTimestamp(),
       });
       container.innerHTML = '';
       container.append(el('div', { class: 'card', style: 'text-align:center;margin-top:16px' },
         el('h2', {}, editing ? '✓ Report updated' : '✓ Report submitted'),
         el('p', { class: 'muted' }, `Recorded for ${date}.`),
-        el('button', { class: 'btn', onclick: () => renderPublic() }, 'Done')));
+        performanceCard(qn, codeData, answers),
+        el('button', { class: 'btn', style: 'margin-top:14px', onclick: () => renderPublic() }, 'Done')));
     } catch (err) {
       errBox.textContent = friendlyError(err);
       btn.disabled = false;
@@ -519,11 +559,11 @@ function tableField(titleText, columns, multi) {
  * Authenticated app shell
  * ------------------------------------------------------------------ */
 const PAGES = {
-  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
-  dept_head: ['dashboard', 'team', 'departments', 'questionnaires', 'reports', 'tasks', 'pendency', 'approvals', 'schedule'],
+  admin: ['dashboard', 'departments', 'users', 'questionnaires', 'reports', 'monitoring', 'tasks', 'pendency', 'approvals', 'schedule'],
+  dept_head: ['dashboard', 'team', 'departments', 'questionnaires', 'reports', 'monitoring', 'tasks', 'pendency', 'approvals', 'schedule'],
   employee: ['tasks', 'reports', 'schedule'],
 };
-const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', tasks: 'Tasks', pendency: 'Pendency', approvals: 'Approvals', schedule: 'My Schedule' };
+const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', monitoring: 'Monitoring', tasks: 'Tasks', pendency: 'Pendency', approvals: 'Approvals', schedule: 'My Schedule' };
 
 function enterApp() {
   root().innerHTML = '';
@@ -552,7 +592,7 @@ function enterApp() {
 const ROUTES = {
   dashboard: renderDashboard, departments: renderDepartments,
   users: () => renderUsers(false), team: () => renderUsers(true),
-  questionnaires: renderQuestionnaires, reports: renderReports, tasks: renderTasks,
+  questionnaires: renderQuestionnaires, reports: renderReports, monitoring: renderMonitoring, tasks: renderTasks,
   pendency: renderPendency, approvals: renderApprovals, schedule: renderSchedule,
 };
 function navigate(page) {
@@ -953,19 +993,32 @@ async function questionnaireModal(existing) {
     const options = el('input', { placeholder: 'Options (comma separated)', value: (q.options || []).join(', ') });
     const multiRow = el('input', { type: 'checkbox', ...(q.multiRow ? { checked: true } : {}) });
     const multiRowLabel = el('label', { style: 'margin:0;font-weight:400' }, multiRow, ' allow adding rows');
+    // Expected performance target(s) — number: one value; table: one per column.
+    const target = el('input', { type: 'number', step: 'any', placeholder: 'Target, e.g. 3', value: (q.target != null ? String(q.target) : '') });
+    const colTargets = el('input', { placeholder: 'Targets per column, e.g. 3, 5000', value: (q.colTargets || []).join(', ') });
+    const period = el('select', {}, ...[['daily', 'per day'], ['weekly', 'per week'], ['monthly', 'per month']].map(([v, l]) => el('option', { value: v, selected: (q.targetPeriod || 'daily') === v }, l)));
+    const targetRow = el('div', { class: 'q-row' }, el('span', { class: 'muted', style: 'font-size:12px' }, 'Expected'), target, colTargets, period);
     const toggle = () => {
       const show = ['select', 'radio', 'checkbox', 'table'].includes(type.value);
       options.style.display = show ? '' : 'none';
       options.placeholder = type.value === 'table' ? 'Columns, e.g. Number of leads, Amount' : 'Options (comma separated)';
       multiRowLabel.style.display = type.value === 'table' ? '' : 'none';
+      target.style.display = type.value === 'number' ? '' : 'none';
+      colTargets.style.display = type.value === 'table' ? '' : 'none';
+      targetRow.style.display = (type.value === 'number' || type.value === 'table') ? '' : 'none';
     };
     type.addEventListener('change', toggle);
     const moveUp = el('button', { type: 'button', class: 'btn ghost small', title: 'Move up', onclick: () => { if (item.previousElementSibling) qWrap.insertBefore(item, item.previousElementSibling); } }, '▲');
     const moveDown = el('button', { type: 'button', class: 'btn ghost small', title: 'Move down', onclick: () => { if (item.nextElementSibling) qWrap.insertBefore(item.nextElementSibling, item); } }, '▼');
     item.append(el('div', { class: 'q-row' }, text, moveUp, moveDown, el('button', { type: 'button', class: 'btn danger small', title: 'Remove', onclick: () => item.remove() }, '✕')),
-      el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required'), multiRowLabel), options);
+      el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required'), multiRowLabel), options, targetRow);
     toggle();
-    item._get = () => ({ id: qid, text: text.value.trim(), type: type.value, required: required.checked, multiRow: type.value === 'table' && multiRow.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
+    item._get = () => {
+      const base = { id: qid, text: text.value.trim(), type: type.value, required: required.checked, multiRow: type.value === 'table' && multiRow.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) };
+      if (type.value === 'number') { const t = parseFloat(target.value); if (!isNaN(t)) { base.target = t; base.targetPeriod = period.value; } }
+      else if (type.value === 'table') { const ts = colTargets.value.split(',').map((s) => { const n = parseFloat(s.trim()); return isNaN(n) ? null : n; }); if (ts.some((n) => n != null)) { base.colTargets = ts; base.targetPeriod = period.value; } }
+      return base;
+    };
     if (atTop && qWrap.firstChild) qWrap.insertBefore(item, qWrap.firstChild);
     else qWrap.append(item);
   };
@@ -1095,6 +1148,65 @@ function reportMetrics(reports) {
   return map;
 }
 const fmtNum = (n) => (Math.round(n * 100) / 100).toLocaleString();
+
+/* ---- Performance targets & feedback ---- */
+// Convert a period target to a per-day figure (working-day estimates).
+const PERIOD_DAYS = { daily: 1, weekly: 6, monthly: 26 };
+const PERIOD_LABEL = { daily: 'per day', weekly: 'per week', monthly: 'per month' };
+// Numeric metrics a questionnaire defines, as { key, label, daily, period }.
+function questionTargets(qn) {
+  const out = [];
+  (qn.questions || []).forEach((q) => {
+    const period = q.targetPeriod || 'daily';
+    const per = PERIOD_DAYS[period] || 1;
+    if (q.type === 'number' && q.target != null) out.push({ key: q.id, label: q.text, daily: q.target / per, period });
+    else if (q.type === 'table' && Array.isArray(q.colTargets)) {
+      (q.options || []).forEach((col, i) => { const t = q.colTargets[i]; if (t != null) out.push({ key: `${q.id}::${col}`, label: `${q.text} — ${col}`, daily: t / per, period }); });
+    }
+  });
+  return out;
+}
+// Apply per-employee daily overrides stored on the code doc (targets map by key).
+function effectiveTargets(qn, overrides) {
+  return questionTargets(qn).map((t) => (overrides && overrides[t.key] != null) ? { ...t, daily: overrides[t.key], overridden: true } : t);
+}
+// Actual numeric values for one report's answers, keyed like questionTargets.
+function answerMetrics(answers, questions) {
+  const qById = Object.fromEntries((questions || []).map((q) => [q.id, q]));
+  const map = {};
+  (answers || []).forEach((a) => {
+    const q = qById[a.questionId]; if (!q) return;
+    if (q.type === 'number') { const n = toNum(a.value); if (n != null) map[a.questionId] = (map[a.questionId] || 0) + n; }
+    else if (q.type === 'table') {
+      String(a.value || '').split(/[\n,]+/).forEach((p) => { const m = p.match(/^\s*(.+?):\s*(.+)$/); if (m) { const n = toNum(m[2]); if (n != null) { const k = `${q.id}::${m[1].trim()}`; map[k] = (map[k] || 0) + n; } } });
+    }
+  });
+  return map;
+}
+// Judge a set of attainment ratios → { tier, message }.
+function performanceVerdict(ratios) {
+  if (!ratios.length) return null;
+  const avg = ratios.reduce((s, r) => s + r, 0) / ratios.length;
+  if (avg >= 1) return { tier: 'excellent', message: 'Excellent — you met or exceeded today’s target. Great work! 🎉' };
+  if (avg >= 0.7) return { tier: 'good', message: 'Good — close to target. A little more gets you there.' };
+  return { tier: 'below', message: 'Below expectation — kindly improve.' };
+}
+// A feedback card comparing one report's actuals to the daily targets.
+function performanceCard(qn, codeData, answers) {
+  const targets = effectiveTargets(qn, codeData && codeData.targets).filter((t) => t.daily > 0);
+  if (!targets.length) return null;
+  const actual = answerMetrics(answers, qn.questions);
+  const ratios = [], rows = [];
+  targets.forEach((t) => {
+    const a = actual[t.key] || 0;
+    ratios.push(a / t.daily);
+    rows.push(el('div', { style: 'font-size:14px' }, `${t.label}: `, el('strong', {}, fmtNum(a)), el('span', { class: 'muted' }, ` / ${fmtNum(t.daily)} expected`)));
+  });
+  const v = performanceVerdict(ratios);
+  if (!v) return null;
+  return el('div', { class: `perf perf-${v.tier}` },
+    el('div', { style: 'font-weight:700;margin-bottom:6px' }, v.message), ...rows);
+}
 
 async function renderReports() {
   await withPage(async () => {
@@ -1230,6 +1342,131 @@ function exportCsv(reports) {
   const url = URL.createObjectURL(blob);
   const link = el('a', { href: url, download: 'daily-reports.csv' });
   document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
+/* ---- Monitoring (per-employee performance + manager feedback) ---- */
+function monitorWindowStart(period) {
+  const d = new Date();
+  if (period === 'today') return localYmd();
+  if (period === 'week') { const back = (d.getDay() + 6) % 7; d.setDate(d.getDate() - back); return localYmd(d); }
+  return localYmd(new Date(d.getFullYear(), d.getMonth(), 1)); // month
+}
+const subYmd = (r) => r.reportDate || submittedYmd(r);
+
+async function renderMonitoring() {
+  await withPage(async () => {
+    const [users, submissions, questionnaires] = await Promise.all([
+      listUsers().catch(() => []),
+      listReports().catch(() => []),
+      listQuestionnaires().catch(() => []),
+    ]);
+    const head = pageHead('Monitoring');
+    const qById = Object.fromEntries(questionnaires.map((q) => [q.id, q]));
+    const staff = users.filter((u) => u.id !== state.user.uid && u.role !== 'admin');
+    if (!staff.length) return [head, el('div', { class: 'empty' }, 'No team members to monitor yet.')];
+
+    // Load each person's code doc (targets overrides + observations).
+    const codes = {};
+    await Promise.all(staff.map(async (u) => {
+      if (!u.uniqueId) return;
+      try { const s = await getDoc(doc(db, 'codes', u.uniqueId)); if (s.exists()) codes[u.id] = { id: u.uniqueId, ...s.data() }; } catch { /* ignore */ }
+    }));
+
+    let period = 'month';
+    const results = el('div', {});
+    const mkBtn = (p, label) => el('button', { class: 'btn ghost small', 'data-p': p, onclick: () => { period = p; sync(); } }, label);
+    const controls = el('div', { class: 'inline', style: 'gap:6px;margin-bottom:14px' }, mkBtn('today', 'Today'), mkBtn('week', 'This week'), mkBtn('month', 'This month'));
+
+    function metricsFor(u) {
+      const from = monitorWindowStart(period), today = localYmd();
+      const subs = submissions.filter((r) => r.userId === u.id && subYmd(r) >= from && subYmd(r) <= today);
+      const days = new Set(subs.map(subYmd)).size;
+      const actual = {};
+      subs.forEach((r) => { const m = answerMetrics(r.answers, (qById[r.questionnaireId] || {}).questions); Object.entries(m).forEach(([k, v]) => { actual[k] = (actual[k] || 0) + v; }); });
+      const tgts = {};
+      new Set(subs.map((r) => r.questionnaireId)).forEach((qid) => { const qn = qById[qid]; if (qn) effectiveTargets(qn, codes[u.id] && codes[u.id].targets).forEach((t) => { tgts[t.key] = t; }); });
+      return { subs, days, actual, tgts };
+    }
+
+    function perfCell(m) {
+      const keys = Object.keys(m.tgts);
+      if (!keys.length) return el('span', { class: 'muted' }, m.subs.length ? 'no targets set' : 'no reports');
+      const wrap = el('div', {});
+      const ratios = [];
+      keys.forEach((k) => {
+        const t = m.tgts[k];
+        const expected = t.daily * (m.days || 0);
+        const act = m.actual[k] || 0;
+        const pct = expected > 0 ? act / expected : null;
+        if (pct != null) ratios.push(pct);
+        const tier = pct == null ? '' : pct >= 1 ? 'perf-excellent' : pct >= 0.7 ? 'perf-good' : 'perf-below';
+        wrap.append(el('div', { class: 'perf-line ' + tier, style: 'font-size:13px' },
+          `${t.label}: `, el('strong', {}, fmtNum(act)), el('span', { class: 'muted' }, ` / ${fmtNum(expected)}`),
+          pct != null ? el('span', {}, ` (${Math.round(pct * 100)}%)`) : null));
+      });
+      return wrap;
+    }
+
+    function sync() {
+      controls.querySelectorAll('.btn').forEach((b) => b.classList.toggle('primary', b.dataset.p === period));
+      results.innerHTML = '';
+      const tbody = el('tbody');
+      staff.forEach((u) => {
+        const m = metricsFor(u);
+        const code = codes[u.id];
+        const lastObs = ((code && code.observations) || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))[0];
+        tbody.append(el('tr', {},
+          el('td', {}, el('div', {}, el('strong', {}, u.name), el('div', { class: 'muted', style: 'font-size:12px' }, u.role === 'dept_head' ? 'dept head' : 'employee'))),
+          el('td', {}, `${m.subs.length} report(s)`, el('div', { class: 'muted', style: 'font-size:12px' }, `${m.days} day(s)`)),
+          el('td', {}, perfCell(m)),
+          el('td', {}, lastObs ? el('div', {}, el('div', { style: 'font-size:13px' }, lastObs.message), lastObs.reply ? el('div', { class: 'muted', style: 'font-size:12px' }, '↳ ' + lastObs.reply) : el('div', { class: 'muted', style: 'font-size:12px' }, 'awaiting reply')) : el('span', { class: 'muted' }, '—')),
+          el('td', {}, el('div', { class: 'row-actions' },
+            el('button', { class: 'btn ghost small', onclick: () => commentModal(u, code) }, 'Comment'),
+            el('button', { class: 'btn ghost small', onclick: () => targetsModal(u, code, qById) }, 'Targets')))));
+      });
+      results.append(el('table', {}, el('thead', {}, el('tr', {},
+        el('th', {}, 'Employee'), el('th', {}, 'Activity'), el('th', {}, `Performance (${period})`), el('th', {}, 'Last feedback'), el('th', {}, ''))), tbody));
+    }
+    sync();
+    return [head, el('p', { class: 'muted', style: 'margin:0 0 12px;font-size:13px' }, 'Performance compares each person’s totals to their expected target × the days they reported. Comment to give feedback (they see it and can reply on their next report); Targets sets per-person expectations.'), controls, results];
+  });
+}
+
+function commentModal(u, code) {
+  const ta = el('textarea', { placeholder: 'e.g. Your performance is excellent — keep it up. / Below expectation, kindly improve.' });
+  modal('Comment · ' + u.name, el('div', {},
+    el('p', { class: 'muted', style: 'font-size:13px' }, 'This appears when the employee next opens to report, and they can reply.'),
+    el('label', {}, 'Observation on performance', ta)), async () => {
+    const text = ta.value.trim(); if (!text) throw new Error('Please write an observation.');
+    if (!code) throw new Error('This employee has no reporting ID to receive feedback.');
+    const obs = ((code.observations) || []).concat([{ id: 'o' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), message: text, fromName: state.user.name, fromUid: state.user.uid, at: new Date().toISOString(), reply: null }]);
+    await updateDoc(doc(db, 'codes', code.id), { observations: obs });
+    if (u.authUid) addDoc(colRef('notifications'), { userId: u.id, message: 'New performance feedback from ' + state.user.name, type: 'feedback', isRead: false, createdAt: serverTimestamp() }).catch(() => {});
+    toast('Feedback sent'); renderMonitoring();
+  }, 'Send feedback');
+}
+
+function targetsModal(u, code, qById) {
+  if (!code) { toast('This employee has no reporting ID.', true); return; }
+  // Candidate metrics = targets from the questionnaires assigned to this person.
+  const assignedQids = (code.questionnaires || []).map((e) => e.questionnaireId);
+  const seen = new Set(); const metrics = [];
+  assignedQids.forEach((qid) => { const qn = qById[qid]; if (qn) questionTargets(qn).forEach((t) => { if (!seen.has(t.key)) { seen.add(t.key); metrics.push(t); } }); });
+  if (!metrics.length) { toast('Assign a questionnaire with numeric targets first.', true); return; }
+  const overrides = (code.targets) || {};
+  const inputs = metrics.map((t) => {
+    const cur = overrides[t.key] != null ? overrides[t.key] : t.daily;
+    const inp = el('input', { type: 'number', step: 'any', value: String(cur) });
+    return { t, inp };
+  });
+  modal('Targets · ' + u.name, el('div', {},
+    el('p', { class: 'muted', style: 'font-size:13px' }, 'Daily expected value per metric for this person. Overrides the questionnaire default.'),
+    ...inputs.map(({ t, inp }) => el('label', {}, `${t.label} — expected per day`, inp))), async () => {
+    const next = {};
+    inputs.forEach(({ t, inp }) => { const n = parseFloat(inp.value); if (!isNaN(n)) next[t.key] = n; });
+    await updateDoc(doc(db, 'codes', code.id), { targets: next });
+    toast('Targets saved'); renderMonitoring();
+  }, 'Save targets');
 }
 
 /* ---- Personal schedule (user-level planner, private to the user) ---- */

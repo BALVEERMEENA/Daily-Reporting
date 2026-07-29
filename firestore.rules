@@ -124,11 +124,11 @@ service cloud.firestore {
       allow get: if true;
       allow list: if false;
       allow create: if scoped(request.resource.data);
-      // Managers may manage the code doc; anyone may edit ONLY their own
-      // personal schedule (the owner when logged in, or the report-by-code
-      // holder when not) — restricted to the `scheduled` field.
+      // Managers may manage the code doc; the owner (logged in) or the
+      // report-by-code holder (anonymous) may edit ONLY their personal
+      // schedule and their replies to manager observations.
       allow update: if scoped(resource.data) ||
-        (changedKeys().hasOnly(['scheduled']) && (
+        (changedKeys().hasOnly(['scheduled', 'observations']) && (
           (request.auth != null && request.auth.uid == resource.data.userId) ||
           request.auth == null));
       allow delete: if scoped(resource.data);
