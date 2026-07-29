@@ -214,3 +214,13 @@ tr:last-child td { border-bottom: none; }
 .qtable td input:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
 .qtable td.qtable-x { padding: 4px 6px; text-align: center; width: 1%; white-space: nowrap; }
 .qtable td.qtable-x .btn { padding: 4px 8px; }
+
+/* Performance feedback */
+.perf { border-radius: 10px; padding: 12px 14px; text-align: left; }
+.perf-excellent { background: #dcfce7; color: #14532d; }
+.perf-good { background: #fef9c3; color: #713f12; }
+.perf-below { background: #fee2e2; color: #7f1d1d; }
+.perf-line { padding: 2px 0; }
+.perf-line.perf-excellent { background: none; color: #15803d; }
+.perf-line.perf-good { background: none; color: #b45309; }
+.perf-line.perf-below { background: none; color: #b91c1c; }
