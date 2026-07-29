@@ -1421,6 +1421,7 @@ async function renderMonitoring() {
           el('td', {}, perfCell(m)),
           el('td', {}, lastObs ? el('div', {}, el('div', { style: 'font-size:13px' }, lastObs.message), lastObs.reply ? el('div', { class: 'muted', style: 'font-size:12px' }, '↳ ' + lastObs.reply) : el('div', { class: 'muted', style: 'font-size:12px' }, 'awaiting reply')) : el('span', { class: 'muted' }, '—')),
           el('td', {}, el('div', { class: 'row-actions' },
+            el('button', { class: 'btn ghost small', onclick: () => viewEmployeeReports(u, code, submissions.filter((r) => r.userId === u.id), qById) }, `Reports (${m.subs.length})`),
             el('button', { class: 'btn ghost small', onclick: () => commentModal(u, code) }, 'Comment'),
             el('button', { class: 'btn ghost small', onclick: () => targetsModal(u, code, qById) }, 'Targets')))));
       });
@@ -1467,6 +1468,37 @@ function targetsModal(u, code, qById) {
     await updateDoc(doc(db, 'codes', code.id), { targets: next });
     toast('Targets saved'); renderMonitoring();
   }, 'Save targets');
+}
+
+// See an employee's submitted reports; open a day to read it, then comment.
+function viewEmployeeReports(u, code, subs, qById) {
+  const wrap = el('div', {});
+  wrap.append(el('div', { class: 'inline', style: 'justify-content:flex-end;margin-bottom:8px' },
+    el('button', { class: 'btn small', onclick: () => commentModal(u, code) }, '💬 Comment on performance')));
+  if (!subs.length) { wrap.append(el('p', { class: 'muted' }, 'No reports submitted yet.')); infoModal('Reports · ' + u.name, wrap); return; }
+  subs.slice().sort((a, b) => String(subYmd(b)).localeCompare(String(subYmd(a)))).forEach((r) => {
+    const qn = qById[r.questionnaireId];
+    const body = el('div', { class: 'hidden', style: 'padding:10px 12px;border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px' });
+    (r.answers || []).forEach((a) => body.append(el('div', { class: 'report-answer' }, el('div', { class: 'q' }, a.question), el('div', { class: 'a' }, a.value || '—'))));
+    // per-metric attainment against this person's daily targets
+    const targets = qn ? effectiveTargets(qn, code && code.targets).filter((t) => t.daily > 0) : [];
+    if (targets.length) {
+      const actual = answerMetrics(r.answers, qn.questions);
+      const perf = el('div', { style: 'margin-top:8px' });
+      targets.forEach((t) => {
+        const a = actual[t.key] || 0; const pct = a / t.daily;
+        const tier = pct >= 1 ? 'perf-excellent' : pct >= 0.7 ? 'perf-good' : 'perf-below';
+        perf.append(el('div', { class: 'perf-line ' + tier, style: 'font-size:13px' },
+          `${t.label}: `, el('strong', {}, fmtNum(a)), el('span', { class: 'muted' }, ` / ${fmtNum(t.daily)} expected`), el('span', {}, ` (${Math.round(pct * 100)}%)`)));
+      });
+      body.append(perf);
+    }
+    body.append(el('button', { class: 'btn small', style: 'margin-top:10px', onclick: () => commentModal(u, code) }, '💬 Comment on performance'));
+    const header = el('button', { class: 'btn ghost', style: 'width:100%;justify-content:space-between;text-align:left;border-radius:8px', onclick: () => body.classList.toggle('hidden') },
+      el('span', {}, `${subYmd(r)} · ${r.questionnaireTitle || 'Report'}`), el('span', { class: 'muted' }, `${(r.answers || []).length} answers ▾`));
+    wrap.append(el('div', { style: 'margin-bottom:8px' }, header, body));
+  });
+  infoModal('Reports · ' + u.name, wrap);
 }
 
 /* ---- Personal schedule (user-level planner, private to the user) ---- */
