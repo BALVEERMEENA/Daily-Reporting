@@ -36,7 +36,7 @@ service cloud.firestore {
     function progressOnly() {
       return changedKeys().hasOnly(
         ['status', 'oneTimeStatus', 'pendingReason', 'completedDate', 'pendency', 'updatedAt',
-         'lastRemark', 'lastRemarkDate']);
+         'lastRemark', 'lastRemarkDate', 'lastTable', 'lastTableDate']);
     }
     // Admin, or a department head whose department is an ancestor of (or equal
     // to) the record's department. `data` is resource.data or request.resource.data.

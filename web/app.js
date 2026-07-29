@@ -402,48 +402,53 @@ function fieldFor(q) {
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
   } else if (q.type === 'table') {
-    // Several fields for one question, rendered as a grid: the title spans the
-    // top, the columns (q.options) form a header row, and one or more input
-    // rows. When the questionnaire maker enabled `multiRow`, reporters can add
-    // and remove rows; otherwise it's a single fixed row.
     label.textContent = '';
     label.style.fontWeight = '400';
-    const cols = opts.length ? opts : ['Value'];
-    const multi = !!q.multiRow;
-    const span = cols.length + (multi ? 1 : 0);
-    const rows = []; // each: { inputs: [<input>], tr }
-    const tbody = el('tbody', {});
-    const addRow = () => {
-      const inputs = cols.map((c) => el('input', { placeholder: c }));
-      const cells = inputs.map((i) => el('td', {}, i));
-      if (multi) {
-        cells.push(el('td', { class: 'qtable-x' },
-          el('button', { type: 'button', class: 'btn danger small', title: 'Remove row',
-            onclick: () => { if (rows.length <= 1) { inputs.forEach((i) => (i.value = '')); return; } const idx = rows.indexOf(rec); if (idx >= 0) { rows.splice(idx, 1); tr.remove(); } } }, '✕')));
-      }
-      const tr = el('tr', {}, ...cells);
-      const rec = { inputs, tr };
-      rows.push(rec); tbody.append(tr);
-      return rec;
-    };
-    const headCells = cols.map((c) => el('th', {}, c));
-    if (multi) headCells.push(el('th', {}));
-    const table = el('table', { class: 'qtable' },
-      el('thead', {},
-        el('tr', {}, el('th', { colspan: String(span) }, q.text + (q.required ? ' *' : ''))),
-        el('tr', {}, ...headCells)),
-      tbody);
-    addRow();
-    label.append(table);
-    if (multi) label.append(el('button', { type: 'button', class: 'btn small', style: 'margin-top:8px', onclick: () => addRow() }, '+ Add row'));
-    getter = () => {
-      const lines = rows.map((rec) => rec.inputs.map((inp, i) => [cols[i], inp.value.trim()]))
-        .filter((cells) => cells.some(([, v]) => v !== ''))
-        .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '));
-      return lines.join('\n');
-    };
+    const { node, get } = tableField(q.text + (q.required ? ' *' : ''), q.options, !!q.multiRow);
+    label.append(node); getter = get;
   } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
   return { node: label, get: getter };
+}
+
+/** Build a grid input: a title spanning the top, `columns` as a header row, and
+ *  one or more input rows. When `multi` is true the user can add/remove rows.
+ *  Returns { node, get } where get() serialises the rows as newline-separated
+ *  "Col: value, ..." lines (same format questionnaire Table answers use, so the
+ *  reporting Totals parser aggregates them automatically). */
+function tableField(titleText, columns, multi) {
+  const wrap = el('div', {});
+  const cols = (columns && columns.length) ? columns : ['Value'];
+  const span = cols.length + (multi ? 1 : 0);
+  const rows = []; // each: { inputs: [<input>], tr }
+  const tbody = el('tbody', {});
+  const addRow = () => {
+    const inputs = cols.map((c) => el('input', { placeholder: c }));
+    const cells = inputs.map((i) => el('td', {}, i));
+    if (multi) {
+      cells.push(el('td', { class: 'qtable-x' },
+        el('button', { type: 'button', class: 'btn danger small', title: 'Remove row',
+          onclick: () => { if (rows.length <= 1) { inputs.forEach((i) => (i.value = '')); return; } const idx = rows.indexOf(rec); if (idx >= 0) { rows.splice(idx, 1); tr.remove(); } } }, '✕')));
+    }
+    const tr = el('tr', {}, ...cells);
+    const rec = { inputs, tr };
+    rows.push(rec); tbody.append(tr);
+    return rec;
+  };
+  const headCells = cols.map((c) => el('th', {}, c));
+  if (multi) headCells.push(el('th', {}));
+  const table = el('table', { class: 'qtable' },
+    el('thead', {},
+      el('tr', {}, el('th', { colspan: String(span) }, titleText)),
+      el('tr', {}, ...headCells)),
+    tbody);
+  addRow();
+  wrap.append(table);
+  if (multi) wrap.append(el('button', { type: 'button', class: 'btn small', style: 'margin-top:8px', onclick: () => addRow() }, '+ Add row'));
+  const get = () => rows.map((rec) => rec.inputs.map((inp, i) => [cols[i], inp.value.trim()]))
+    .filter((cells) => cells.some(([, v]) => v !== ''))
+    .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '))
+    .join('\n');
+  return { node: wrap, get };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1305,6 +1310,7 @@ function taskMeta(t) {
   if (t.type === 'onetime' && t.oneTimeStatus === 'completed' && t.completedDate) parts.push('completed ' + t.completedDate);
   if (t.type === 'onetime' && t.oneTimeStatus !== 'completed' && t.pendingReason) parts.push('reason: ' + t.pendingReason);
   if (t.lastRemark) parts.push(`work ${t.lastRemarkDate ? '(' + t.lastRemarkDate + ')' : ''}: ${t.lastRemark}`);
+  if (t.lastTable) parts.push(`table ${t.lastTableDate ? '(' + t.lastTableDate + ')' : ''}: ${t.lastTable.replace(/\n/g, '; ')}`);
   return parts.join(' • ');
 }
 
@@ -1313,6 +1319,11 @@ function taskMeta(t) {
 function taskUpdateControls(task, ctx, onDone) {
   const wrap = el('div', {});
   const err = el('div', { class: 'error' });
+  // Optional data table attached to the task (columns defined when assigned).
+  const tf = (task.tableColumns && task.tableColumns.length)
+    ? tableField(task.tableTitle || 'Details', task.tableColumns, !!task.tableMultiRow) : null;
+  const tableNode = tf ? el('label', {}, task.tableTitle || 'Details', tf.node) : null;
+  const tableVal = () => (tf ? tf.get() : '');
   if (task.type === 'pendency') {
     const completed = el('input', { type: 'number', min: '0', step: '1', value: '0' });
     const added = el('input', { type: 'number', min: '0', step: '1', value: '0' });
@@ -1323,7 +1334,7 @@ function taskUpdateControls(task, ctx, onDone) {
       const c = Math.max(0, parseInt(completed.value || '0', 10) || 0);
       const a = Math.max(0, parseInt(added.value || '0', 10) || 0);
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed: c, added: a, workDone: workDone.value.trim() }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed: c, added: a, workDone: workDone.value.trim(), table: tableVal() }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
@@ -1331,6 +1342,7 @@ function taskUpdateControls(task, ctx, onDone) {
       el('div', { class: 'inline' },
         el('label', { style: 'flex:1' }, 'Completed today', completed),
         el('label', { style: 'flex:1' }, 'Newly added', added)),
+      tableNode,
       el('label', {}, 'Work done today', workDone),
       btn, err);
   } else {
@@ -1345,11 +1357,12 @@ function taskUpdateControls(task, ctx, onDone) {
       const note = workDone.value.trim();
       if (!completed && !note) { err.textContent = 'Please describe the work done, or why it is still pending.'; return; }
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed, reason: note, workDone: note }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed, reason: note, workDone: note, table: tableVal() }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
       el('div', { class: 'checkbox-list' }, el('label', {}, doneR, ' Completed'), el('label', {}, pendR, ' Still pending')),
+      tableNode,
       el('label', {}, 'Work done today', workDone), btn, err);
   }
   return wrap;
@@ -1362,10 +1375,14 @@ async function commitTaskUpdate(task, ctx, data) {
   const taskRef = doc(db, 'tasks', task.id);
   const upRef = doc(colRef('taskUpdates'));
   const workDone = (data.workDone || '').trim();
-  // Extra fields written onto the task doc so the latest remark shows at a
+  const table = (data.table || '').trim();
+  // Extra fields written onto the task doc so the latest remark/table show at a
   // glance. Must stay within the fields allowed by progressOnly() in the rules.
-  const remarkPatch = workDone ? { lastRemark: workDone, lastRemarkDate: today } : {};
-  const withRemark = (obj) => (workDone ? { ...obj, workDone } : obj);
+  const remarkPatch = {
+    ...(workDone ? { lastRemark: workDone, lastRemarkDate: today } : {}),
+    ...(table ? { lastTable: table, lastTableDate: today } : {}),
+  };
+  const withRemark = (obj) => ({ ...obj, ...(workDone ? { workDone } : {}), ...(table ? { table } : {}) });
   const base = {
     taskId: task.id, userId: task.assignedTo, uniqueId, departmentId: task.departmentId ?? null,
     deptPath: task.deptPath ?? [], type: task.type, date: today, createdAt: serverTimestamp(),
@@ -1376,18 +1393,16 @@ async function commitTaskUpdate(task, ctx, data) {
     batch.update(taskRef, { pendency: after, status: after <= 0 ? 'closed' : 'open', updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, completed: data.completed, added: data.added, before, after }));
     task.pendency = after; task.status = after <= 0 ? 'closed' : 'open';
-    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   } else if (data.completed) {
     batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'closed', updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, action: 'completed', completedDate: today }));
     task.oneTimeStatus = 'completed'; task.status = 'closed';
-    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   } else {
     batch.update(taskRef, { pendingReason: data.reason, updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, action: 'pending', reason: data.reason }));
     task.pendingReason = data.reason;
-    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   }
+  Object.assign(task, remarkPatch); // reflect latest remark/table locally for re-render
   await batch.commit();
   toast('Task updated');
 }
@@ -1445,6 +1460,7 @@ async function taskHistory(t) {
       : `${when}: ${u.action}${u.reason ? ' — ' + u.reason : ''}${u.completedDate ? ' (' + u.completedDate + ')' : ''}`;
     // Show the work-done remark when it isn't already the pending reason.
     if (u.workDone && u.workDone !== u.reason) line += ` — work: ${u.workDone}`;
+    if (u.table) line += ` — table: ${u.table.replace(/\n/g, '; ')}`;
     body.append(el('div', { class: 'report-answer' }, el('div', { class: 'a' }, line)));
   });
   infoModal('History · ' + t.title, body);
@@ -1462,12 +1478,18 @@ function taskModal(users) {
   const pendLabel = el('label', {}, 'Starting pending count', pend);
   pendLabel.style.display = 'none';
   type.addEventListener('change', () => { pendLabel.style.display = type.value === 'pendency' ? '' : 'none'; });
+  const tableTitle = el('input', { placeholder: 'Table heading, e.g. Leads' });
+  const tableCols = el('input', { placeholder: 'Columns, comma separated, e.g. Number, Amount' });
+  const tableMulti = el('input', { type: 'checkbox' });
   modal('Assign task', el('div', {},
     el('label', {}, 'Title', title), el('label', {}, 'Description', desc),
     el('label', {}, 'Assign to', assignee),
     el('label', {}, 'Type', type),
     el('label', {}, 'Horizon in days (optional)', horizon),
     pendLabel,
+    el('p', { class: 'muted', style: 'font-size:13px;margin-bottom:2px' }, 'Optional data table the person fills in when updating this task:'),
+    el('div', { class: 'inline' }, el('label', { style: 'flex:1' }, 'Table heading', tableTitle), el('label', { style: 'flex:2' }, 'Table columns', tableCols)),
+    el('label', { style: 'font-weight:400' }, tableMulti, ' allow adding rows'),
     el('p', { class: 'muted', style: 'font-size:13px' }, 'The person updates this task by entering their Unique ID to report, or from their dashboard if they have a login.')), async () => {
     if (!assignee.value) throw new Error('Choose an assignee');
     const u = users.find((x) => x.id === assignee.value);
@@ -1477,6 +1499,7 @@ function taskModal(users) {
     const dueDate = horizonDays ? addDays(horizonDays) : null;
     let pendency = null;
     if (t === 'pendency') { pendency = parseInt(pend.value || '0', 10); if (!(pendency > 0)) throw new Error('Enter a starting pending count greater than 0.'); }
+    const tableColumns = tableCols.value.split(',').map((s) => s.trim()).filter(Boolean);
     const taskRef = doc(colRef('tasks'));
     const batch = writeBatch(db);
     batch.set(taskRef, {
@@ -1485,6 +1508,7 @@ function taskModal(users) {
       departmentId: u.departmentId ?? null, deptPath: u.deptPath || [], type: t, horizonDays, dueDate, status: 'open',
       oneTimeStatus: t === 'onetime' ? 'pending' : null, pendingReason: null, completedDate: null,
       pendency: t === 'pendency' ? pendency : null, initialPendency: t === 'pendency' ? pendency : null,
+      tableColumns, tableTitle: tableColumns.length ? (tableTitle.value.trim() || 'Details') : null, tableMultiRow: tableColumns.length ? tableMulti.checked : false,
       createdAt: serverTimestamp(),
     });
     batch.update(doc(db, 'codes', u.uniqueId), { tasks: arrayUnion(taskRef.id) });
@@ -1498,13 +1522,22 @@ function taskEditModal(t) {
   const desc = el('textarea', {}, t.description || '');
   const due = el('input', { type: 'date', value: t.dueDate || '' });
   const pend = el('input', { type: 'number', min: '0', step: '1', value: String(t.pendency ?? 0) });
+  const tableTitle = el('input', { placeholder: 'Table heading, e.g. Leads', value: t.tableTitle || '' });
+  const tableCols = el('input', { placeholder: 'Columns, comma separated, e.g. Number, Amount', value: (t.tableColumns || []).join(', ') });
+  const tableMulti = el('input', { type: 'checkbox', ...(t.tableMultiRow ? { checked: true } : {}) });
   modal('Edit task', el('div', {},
     el('label', {}, 'Title', title),
     el('label', {}, 'Description', desc),
     el('label', {}, 'Due date', due),
-    t.type === 'pendency' ? el('label', {}, 'Current pending count', pend) : null),
+    t.type === 'pendency' ? el('label', {}, 'Current pending count', pend) : null,
+    el('p', { class: 'muted', style: 'font-size:13px;margin-bottom:2px' }, 'Optional data table the person fills in when updating this task:'),
+    el('div', { class: 'inline' }, el('label', { style: 'flex:1' }, 'Table heading', tableTitle), el('label', { style: 'flex:2' }, 'Table columns', tableCols)),
+    el('label', { style: 'font-weight:400' }, tableMulti, ' allow adding rows')),
     async () => {
-      const patch = { title: title.value.trim(), description: desc.value.trim(), dueDate: due.value || null, updatedAt: serverTimestamp() };
+      const tableColumns = tableCols.value.split(',').map((s) => s.trim()).filter(Boolean);
+      const patch = { title: title.value.trim(), description: desc.value.trim(), dueDate: due.value || null,
+        tableColumns, tableTitle: tableColumns.length ? (tableTitle.value.trim() || 'Details') : null, tableMultiRow: tableColumns.length ? tableMulti.checked : false,
+        updatedAt: serverTimestamp() };
       if (t.type === 'pendency') {
         const p = Math.max(0, parseInt(pend.value || '0', 10) || 0);
         patch.pendency = p;
