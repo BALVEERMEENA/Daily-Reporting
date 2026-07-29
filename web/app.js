@@ -403,21 +403,44 @@ function fieldFor(q) {
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
   } else if (q.type === 'table') {
     // Several fields for one question, rendered as a grid: the title spans the
-    // top, the columns (q.options) form a header row, and there is one input row.
+    // top, the columns (q.options) form a header row, and one or more input
+    // rows. When the questionnaire maker enabled `multiRow`, reporters can add
+    // and remove rows; otherwise it's a single fixed row.
     label.textContent = '';
     label.style.fontWeight = '400';
     const cols = opts.length ? opts : ['Value'];
-    const inputs = cols.map((c) => el('input', { placeholder: c }));
+    const multi = !!q.multiRow;
+    const span = cols.length + (multi ? 1 : 0);
+    const rows = []; // each: { inputs: [<input>], tr }
+    const tbody = el('tbody', {});
+    const addRow = () => {
+      const inputs = cols.map((c) => el('input', { placeholder: c }));
+      const cells = inputs.map((i) => el('td', {}, i));
+      if (multi) {
+        cells.push(el('td', { class: 'qtable-x' },
+          el('button', { type: 'button', class: 'btn danger small', title: 'Remove row',
+            onclick: () => { if (rows.length <= 1) { inputs.forEach((i) => (i.value = '')); return; } const idx = rows.indexOf(rec); if (idx >= 0) { rows.splice(idx, 1); tr.remove(); } } }, '✕')));
+      }
+      const tr = el('tr', {}, ...cells);
+      const rec = { inputs, tr };
+      rows.push(rec); tbody.append(tr);
+      return rec;
+    };
+    const headCells = cols.map((c) => el('th', {}, c));
+    if (multi) headCells.push(el('th', {}));
     const table = el('table', { class: 'qtable' },
       el('thead', {},
-        el('tr', {}, el('th', { colspan: String(cols.length) }, q.text + (q.required ? ' *' : ''))),
-        el('tr', {}, ...cols.map((c) => el('th', {}, c)))),
-      el('tbody', {}, el('tr', {}, ...inputs.map((i) => el('td', {}, i)))));
+        el('tr', {}, el('th', { colspan: String(span) }, q.text + (q.required ? ' *' : ''))),
+        el('tr', {}, ...headCells)),
+      tbody);
+    addRow();
     label.append(table);
+    if (multi) label.append(el('button', { type: 'button', class: 'btn small', style: 'margin-top:8px', onclick: () => addRow() }, '+ Add row'));
     getter = () => {
-      const cells = inputs.map((inp, i) => [cols[i], inp.value.trim()]);
-      if (cells.every(([, v]) => v === '')) return '';
-      return cells.map(([c, v]) => `${c}: ${v}`).join(', ');
+      const lines = rows.map((rec) => rec.inputs.map((inp, i) => [cols[i], inp.value.trim()]))
+        .filter((cells) => cells.some(([, v]) => v !== ''))
+        .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '));
+      return lines.join('\n');
     };
   } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
   return { node: label, get: getter };
@@ -859,18 +882,21 @@ async function questionnaireModal(existing) {
     const type = el('select', {}, ...Q_TYPES.map(([v, l]) => el('option', { value: v, selected: q.type === v }, l)));
     const required = el('input', { type: 'checkbox', ...(q.required ? { checked: true } : {}) });
     const options = el('input', { placeholder: 'Options (comma separated)', value: (q.options || []).join(', ') });
+    const multiRow = el('input', { type: 'checkbox', ...(q.multiRow ? { checked: true } : {}) });
+    const multiRowLabel = el('label', { style: 'margin:0;font-weight:400' }, multiRow, ' allow adding rows');
     const toggle = () => {
       const show = ['select', 'radio', 'checkbox', 'table'].includes(type.value);
       options.style.display = show ? '' : 'none';
       options.placeholder = type.value === 'table' ? 'Columns, e.g. Number of leads, Amount' : 'Options (comma separated)';
+      multiRowLabel.style.display = type.value === 'table' ? '' : 'none';
     };
     type.addEventListener('change', toggle);
     const moveUp = el('button', { type: 'button', class: 'btn ghost small', title: 'Move up', onclick: () => { if (item.previousElementSibling) qWrap.insertBefore(item, item.previousElementSibling); } }, '▲');
     const moveDown = el('button', { type: 'button', class: 'btn ghost small', title: 'Move down', onclick: () => { if (item.nextElementSibling) qWrap.insertBefore(item.nextElementSibling, item); } }, '▼');
     item.append(el('div', { class: 'q-row' }, text, moveUp, moveDown, el('button', { type: 'button', class: 'btn danger small', title: 'Remove', onclick: () => item.remove() }, '✕')),
-      el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required')), options);
+      el('div', { class: 'q-row' }, type, el('label', { style: 'margin:0;font-weight:400' }, required, ' required'), multiRowLabel), options);
     toggle();
-    item._get = () => ({ id: qid, text: text.value.trim(), type: type.value, required: required.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
+    item._get = () => ({ id: qid, text: text.value.trim(), type: type.value, required: required.checked, multiRow: type.value === 'table' && multiRow.checked, options: options.value.split(',').map((s) => s.trim()).filter(Boolean) });
     if (atTop && qWrap.firstChild) qWrap.insertBefore(item, qWrap.firstChild);
     else qWrap.append(item);
   };
