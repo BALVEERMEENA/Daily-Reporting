@@ -1304,6 +1304,7 @@ function taskMeta(t) {
   else if (t.horizonDays) parts.push(t.horizonDays + '-day');
   if (t.type === 'onetime' && t.oneTimeStatus === 'completed' && t.completedDate) parts.push('completed ' + t.completedDate);
   if (t.type === 'onetime' && t.oneTimeStatus !== 'completed' && t.pendingReason) parts.push('reason: ' + t.pendingReason);
+  if (t.lastRemark) parts.push(`work ${t.lastRemarkDate ? '(' + t.lastRemarkDate + ')' : ''}: ${t.lastRemark}`);
   return parts.join(' • ');
 }
 
@@ -1315,13 +1316,14 @@ function taskUpdateControls(task, ctx, onDone) {
   if (task.type === 'pendency') {
     const completed = el('input', { type: 'number', min: '0', step: '1', value: '0' });
     const added = el('input', { type: 'number', min: '0', step: '1', value: '0' });
+    const workDone = el('textarea', { placeholder: 'What work did you do today? (optional)' });
     const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
     btn.addEventListener('click', async () => {
       err.textContent = '';
       const c = Math.max(0, parseInt(completed.value || '0', 10) || 0);
       const a = Math.max(0, parseInt(added.value || '0', 10) || 0);
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed: c, added: a }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed: c, added: a, workDone: workDone.value.trim() }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
@@ -1329,24 +1331,26 @@ function taskUpdateControls(task, ctx, onDone) {
       el('div', { class: 'inline' },
         el('label', { style: 'flex:1' }, 'Completed today', completed),
         el('label', { style: 'flex:1' }, 'Newly added', added)),
+      el('label', {}, 'Work done today', workDone),
       btn, err);
   } else {
     const grp = 'ot' + task.id;
     const doneR = el('input', { type: 'radio', name: grp, value: 'completed' });
     const pendR = el('input', { type: 'radio', name: grp, value: 'pending', checked: true });
-    const reason = el('textarea', { placeholder: 'Reason for still pending' });
+    const workDone = el('textarea', { placeholder: 'What work did you do today?' });
     const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
     btn.addEventListener('click', async () => {
       err.textContent = '';
       const completed = doneR.checked;
-      if (!completed && !reason.value.trim()) { err.textContent = 'Please give a reason for pending.'; return; }
+      const note = workDone.value.trim();
+      if (!completed && !note) { err.textContent = 'Please describe the work done, or why it is still pending.'; return; }
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed, reason: reason.value.trim() }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed, reason: note, workDone: note }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
       el('div', { class: 'checkbox-list' }, el('label', {}, doneR, ' Completed'), el('label', {}, pendR, ' Still pending')),
-      el('label', {}, 'If pending, reason', reason), btn, err);
+      el('label', {}, 'Work done today', workDone), btn, err);
   }
   return wrap;
 }
@@ -1357,6 +1361,11 @@ async function commitTaskUpdate(task, ctx, data) {
   const batch = writeBatch(db);
   const taskRef = doc(db, 'tasks', task.id);
   const upRef = doc(colRef('taskUpdates'));
+  const workDone = (data.workDone || '').trim();
+  // Extra fields written onto the task doc so the latest remark shows at a
+  // glance. Must stay within the fields allowed by progressOnly() in the rules.
+  const remarkPatch = workDone ? { lastRemark: workDone, lastRemarkDate: today } : {};
+  const withRemark = (obj) => (workDone ? { ...obj, workDone } : obj);
   const base = {
     taskId: task.id, userId: task.assignedTo, uniqueId, departmentId: task.departmentId ?? null,
     deptPath: task.deptPath ?? [], type: task.type, date: today, createdAt: serverTimestamp(),
@@ -1364,17 +1373,20 @@ async function commitTaskUpdate(task, ctx, data) {
   if (task.type === 'pendency') {
     const before = task.pendency ?? 0;
     const after = before - data.completed + data.added;
-    batch.update(taskRef, { pendency: after, status: after <= 0 ? 'closed' : 'open', updatedAt: serverTimestamp() });
-    batch.set(upRef, { ...base, completed: data.completed, added: data.added, before, after });
+    batch.update(taskRef, { pendency: after, status: after <= 0 ? 'closed' : 'open', updatedAt: serverTimestamp(), ...remarkPatch });
+    batch.set(upRef, withRemark({ ...base, completed: data.completed, added: data.added, before, after }));
     task.pendency = after; task.status = after <= 0 ? 'closed' : 'open';
+    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   } else if (data.completed) {
-    batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'closed', updatedAt: serverTimestamp() });
-    batch.set(upRef, { ...base, action: 'completed', completedDate: today });
+    batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'closed', updatedAt: serverTimestamp(), ...remarkPatch });
+    batch.set(upRef, withRemark({ ...base, action: 'completed', completedDate: today }));
     task.oneTimeStatus = 'completed'; task.status = 'closed';
+    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   } else {
-    batch.update(taskRef, { pendingReason: data.reason, updatedAt: serverTimestamp() });
-    batch.set(upRef, { ...base, action: 'pending', reason: data.reason });
+    batch.update(taskRef, { pendingReason: data.reason, updatedAt: serverTimestamp(), ...remarkPatch });
+    batch.set(upRef, withRemark({ ...base, action: 'pending', reason: data.reason }));
     task.pendingReason = data.reason;
+    if (workDone) { task.lastRemark = workDone; task.lastRemarkDate = today; }
   }
   await batch.commit();
   toast('Task updated');
@@ -1428,9 +1440,11 @@ async function taskHistory(t) {
   if (!ups.length) body.append(el('p', { class: 'muted' }, 'No updates yet.'));
   else ups.forEach((u) => {
     const when = u.date || fmtDate(u.createdAt);
-    const line = u.type === 'pendency'
+    let line = u.type === 'pendency'
       ? `${when}: completed ${u.completed}, added ${u.added} → pending ${u.after}`
       : `${when}: ${u.action}${u.reason ? ' — ' + u.reason : ''}${u.completedDate ? ' (' + u.completedDate + ')' : ''}`;
+    // Show the work-done remark when it isn't already the pending reason.
+    if (u.workDone && u.workDone !== u.reason) line += ` — work: ${u.workDone}`;
     body.append(el('div', { class: 'report-answer' }, el('div', { class: 'a' }, line)));
   });
   infoModal('History · ' + t.title, body);
