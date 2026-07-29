@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Simple launch theme; the actual UI is the web app rendered by the TWA. -->
+    <style name="Theme.App" parent="android:Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/backgroundColor</item>
+    </style>
+</resources>

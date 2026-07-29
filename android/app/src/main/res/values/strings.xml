@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="appName">Daily Reporting</string>
+
+    <!-- The deployed PWA this app wraps. -->
+    <string name="launchUrl">https://dr2785.web.app</string>
+    <string name="hostName">dr2785.web.app</string>
+
+    <!-- Links the app to the website so the Trusted Web Activity runs
+         full-screen (no browser address bar). This must match the
+         assetlinks.json served at
+         https://dr2785.web.app/.well-known/assetlinks.json -->
+    <string name="assetStatements">
+        [{
+            \"relation\": [\"delegate_permission/common.handle_all_urls\"],
+            \"target\": {
+                \"namespace\": \"web\",
+                \"site\": \"https://dr2785.web.app\"
+            }
+        }]
+    </string>
+</resources>

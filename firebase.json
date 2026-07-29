@@ -1,7 +1,8 @@
 {
   "hosting": {
     "public": "web",
-    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "//": "Do not use the default **/.* ignore — it would skip .well-known/ (needed for TWA Digital Asset Links).",
+    "ignore": ["firebase.json", "**/node_modules/**", "**/.DS_Store"],
     "rewrites": [{ "source": "**", "destination": "/index.html" }],
     "headers": [
       {
