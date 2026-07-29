@@ -1258,45 +1258,55 @@ async function renderSchedule() {
   });
 }
 
-/* ---- Cumulative pendency (roll-up across the subtree) ---- */
+/* ---- Pendency: clear staff-wise and task-wise tracking ---- */
 async function renderPendency() {
   await withPage(async () => {
-    const [tasks, departments] = await Promise.all([listTasks(), listDepartments().catch(() => [])]);
+    const tasks = await listTasks();
     const pend = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed');
-    const head = pageHead('Pendency (cumulative)');
-    const grand = pend.reduce((s, t) => s + (t.pendency || 0), 0);
-    const totalTile = el('div', { class: 'tile', style: 'margin-bottom:14px' }, el('h3', {}, 'Total pending (your scope)'), el('div', { class: 'big' }, String(grand)), el('div', { class: 'muted' }, `${pend.length} open quantity task(s)`));
-    if (!pend.length) return [head, totalTile, el('div', { class: 'empty' }, 'No open quantity/pendency tasks.')];
+    const head = pageHead('Pendency');
+    if (!pend.length) return [head, el('div', { class: 'empty' }, 'No open quantity tasks. Pendency shows here once a quantity task is assigned.')];
 
-    const paths = computePaths(departments);
-    let scopeDepts = departments;
-    if (state.user.role === 'dept_head') {
-      const my = state.user.departmentId;
-      scopeDepts = departments.filter((d) => (paths[d.id] || []).includes(my));
-    }
-    const ordered = scopeDepts.slice().sort((a, b) =>
-      (paths[a.id] || []).map((id) => deptName(departments, id)).join('/').localeCompare(
-        (paths[b.id] || []).map((id) => deptName(departments, id)).join('/')));
-    const direct = (id) => pend.filter((t) => t.departmentId === id).reduce((s, t) => s + (t.pendency || 0), 0);
-    const cumulative = (id) => pend.filter((t) => (t.deptPath || []).includes(id)).reduce((s, t) => s + (t.pendency || 0), 0);
-    const openCount = (id) => pend.filter((t) => (t.deptPath || []).includes(id)).length;
-
-    const tbody = el('tbody');
-    ordered.forEach((d) => {
-      const depth = (paths[d.id] || [d.id]).length - 1;
-      tbody.append(el('tr', {},
-        el('td', {}, el('span', depth ? { class: 'muted' } : {}, (depth ? '—'.repeat(depth) + ' ' : '') + d.name)),
-        el('td', {}, String(direct(d.id))),
-        el('td', {}, el('strong', {}, String(cumulative(d.id)))),
-        el('td', {}, String(openCount(d.id)))));
+    // ----- By staff -----
+    const byStaff = new Map();
+    pend.forEach((t) => {
+      const key = t.assignedTo || t.assignedToName || '—';
+      const g = byStaff.get(key) || { name: t.assignedToName || '—', pending: 0, count: 0 };
+      g.pending += (t.pendency || 0); g.count += 1;
+      byStaff.set(key, g);
     });
-    const noDept = pend.filter((t) => !t.departmentId);
-    if (noDept.length) tbody.append(el('tr', {}, el('td', {}, '(no department)'),
-      el('td', {}, String(noDept.reduce((s, t) => s + (t.pendency || 0), 0))), el('td', {}, '—'), el('td', {}, String(noDept.length))));
+    const staffRows = [...byStaff.values()].sort((a, b) => b.pending - a.pending || b.count - a.count);
+    const staffBody = el('tbody');
+    staffRows.forEach((s) => staffBody.append(el('tr', {},
+      el('td', {}, el('strong', {}, s.name)),
+      el('td', {}, String(s.count)),
+      el('td', {}, el('strong', {}, String(s.pending))))));
 
-    return [head, totalTile,
-      el('p', { class: 'muted', style: 'margin:0 0 12px' }, 'Direct = quantity tasks in that department. Cumulative = that department plus every sub-department beneath it.'),
-      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Department'), el('th', {}, 'Direct'), el('th', {}, 'Cumulative'), el('th', {}, 'Open tasks'))), tbody)];
+    // ----- By task -----  (started, done so far, still pending, last work note)
+    const taskBody = el('tbody');
+    pend.slice().sort((a, b) => (a.assignedToName || '').localeCompare(b.assignedToName || '') || (b.pendency || 0) - (a.pendency || 0)).forEach((t) => {
+      const start = t.initialPendency;
+      const now = t.pendency || 0;
+      const done = (start != null && start >= now) ? start - now : null; // net completed (blank if more were added)
+      const workNote = t.lastRemark ? `${t.lastRemarkDate ? t.lastRemarkDate + ': ' : ''}${t.lastRemark}` : '';
+      taskBody.append(el('tr', {},
+        el('td', {}, t.assignedToName || ''),
+        el('td', {}, el('div', {}, el('strong', {}, t.title), t.dueDate ? el('div', { class: 'muted', style: 'font-size:12px' }, 'due ' + t.dueDate) : null)),
+        el('td', {}, start != null ? String(start) : '—'),
+        el('td', {}, done != null ? String(done) : '—'),
+        el('td', {}, el('strong', {}, String(now))),
+        el('td', {}, workNote ? el('span', { class: 'muted' }, workNote) : el('span', { class: 'muted' }, '—')),
+        el('td', {}, el('div', { class: 'row-actions' },
+          el('button', { class: 'btn ghost small', onclick: () => openTaskUpdate(t) }, 'Update'),
+          el('button', { class: 'btn ghost small', onclick: () => taskHistory(t) }, 'History')))));
+    });
+
+    return [head,
+      el('h3', { style: 'margin:4px 0 8px' }, 'By staff'),
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Staff'), el('th', {}, 'Open tasks'), el('th', {}, 'Pending'))), staffBody),
+      el('h3', { style: 'margin:24px 0 8px' }, 'By task'),
+      el('p', { class: 'muted', style: 'margin:0 0 10px;font-size:13px' }, 'Started = original count · Done = net completed so far · Pending = still open. Tap History for the day-by-day log of work done.'),
+      el('table', {}, el('thead', {}, el('tr', {},
+        el('th', {}, 'Staff'), el('th', {}, 'Task'), el('th', {}, 'Started'), el('th', {}, 'Done'), el('th', {}, 'Pending'), el('th', {}, 'Last work done'), el('th', {}, ''))), taskBody)];
   });
 }
 
