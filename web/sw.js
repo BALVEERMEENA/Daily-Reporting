@@ -3,7 +3,7 @@
  * a cache fallback for offline. Cross-origin requests (the Firebase SDK on
  * gstatic, and Firestore/Auth on googleapis) are left untouched so realtime
  * data always goes straight to the network. */
-const CACHE = 'daily-reporting-v1';
+const CACHE = 'daily-reporting-v2';
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/firebase-config.js',
   '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png',
@@ -29,8 +29,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // Firebase SDK & Firestore/Auth: network only
 
+  // Bypass the browser HTTP cache so a fresh deploy is fetched every time; fall
+  // back to the runtime cache only when offline.
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'reload' })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
