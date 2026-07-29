@@ -144,22 +144,42 @@ service cloud.firestore {
     // ---- submissions ----
     // Created by the (possibly anonymous) reporting flow, but only when the
     // payload matches a real code and an active assignment for that user.
+    // New reports use a deterministic id `${assignmentId}__${reportDate}` so
+    // there is exactly one report per person + questionnaire + date, and the
+    // code holder can find, overwrite (Modify) or delete their own.
+    function submissionValid(data) {
+      return data.answers is list &&
+        data.reportDate is string &&
+        exists(/databases/$(database)/documents/codes/$(data.uniqueId)) &&
+        codeData(data.uniqueId).userId == data.userId &&
+        data.deptPath == codeData(data.uniqueId).deptPath &&
+        exists(/databases/$(database)/documents/assignments/$(data.assignmentId)) &&
+        assignmentData(data.assignmentId).active == true &&
+        assignmentData(data.assignmentId).userId == data.userId &&
+        assignmentData(data.assignmentId).questionnaireId == data.questionnaireId;
+    }
     match /submissions/{id} {
-      allow read: if isSignedIn() && (
+      // Single-doc reads: the id embeds the random assignmentId, so only the
+      // code holder (or a manager who has the record) can construct it.
+      allow get: if true;
+      // Queries stay restricted to the owner and managers in scope.
+      allow list: if isSignedIn() && (
         resource.data.userId == request.auth.uid || scoped(resource.data)
       );
-      allow create: if
-        request.resource.data.submittedAt == request.time &&
-        request.resource.data.answers is list &&
-        exists(/databases/$(database)/documents/codes/$(request.resource.data.uniqueId)) &&
-        codeData(request.resource.data.uniqueId).userId == request.resource.data.userId &&
-        request.resource.data.deptPath == codeData(request.resource.data.uniqueId).deptPath &&
-        exists(/databases/$(database)/documents/assignments/$(request.resource.data.assignmentId)) &&
-        assignmentData(request.resource.data.assignmentId).active == true &&
-        assignmentData(request.resource.data.assignmentId).userId == request.resource.data.userId &&
-        assignmentData(request.resource.data.assignmentId).questionnaireId == request.resource.data.questionnaireId;
-      allow update: if false;
-      allow delete: if scoped(resource.data);
+      allow create: if request.resource.data.submittedAt == request.time &&
+        submissionValid(request.resource.data);
+      // Overwrite (Modify) an existing report, keeping identity + date fixed.
+      allow update: if request.resource.data.submittedAt == request.time &&
+        submissionValid(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.assignmentId == resource.data.assignmentId &&
+        request.resource.data.reportDate == resource.data.reportDate;
+      // A manager in scope deletes freely. The anonymous reporting surface may
+      // also delete a report (it must already know the unguessable doc id,
+      // which embeds the random assignmentId — i.e. it holds the code).
+      allow delete: if scoped(resource.data) ||
+        (request.auth == null &&
+          exists(/databases/$(database)/documents/codes/$(resource.data.uniqueId)));
     }
 
     // ---- tasks ----

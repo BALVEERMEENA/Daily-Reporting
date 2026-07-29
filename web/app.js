@@ -338,15 +338,63 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
   const form = el('form', {});
   form.append(el('h2', {}, qn.title),
     qn.description ? el('p', { class: 'muted' }, qn.description) : null);
+
+  // Mandatory reporting date — the date the report is FOR (defaults to today,
+  // never in the future). One report per person + questionnaire + date.
+  const dateI = el('input', { type: 'date', required: true, value: localYmd(), max: localYmd() });
+  form.append(el('label', {}, 'Date of reporting *', dateI));
+  const banner = el('div', {});
+  form.append(banner);
+
   const questions = (qn.questions || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0));
   const inputs = [];
-  questions.forEach((q) => { const { node, get } = fieldFor(q); form.append(node); inputs.push({ q, get }); });
+  const fieldsWrap = el('div', {});
+  questions.forEach((q) => { const f = fieldFor(q); fieldsWrap.append(f.node); inputs.push({ q, get: f.get, set: f.set }); });
+  form.append(fieldsWrap);
+
   const errBox = el('div', { class: 'error' });
   const btn = el('button', { type: 'submit', class: 'btn primary' }, 'Submit report');
   form.append(errBox, btn);
+
+  const subId = (date) => `${entry.assignmentId}__${date}`;
+  let existing = null, editing = false;
+  const applyAnswers = (sub) => { const m = {}; (sub.answers || []).forEach((a) => { m[a.questionId] = a.value; }); inputs.forEach((f) => f.set(m[f.q.id] != null ? m[f.q.id] : '')); };
+  const clearAnswers = () => inputs.forEach((f) => f.set(''));
+  const lockFields = (dis) => fieldsWrap.querySelectorAll('input,select,textarea,button').forEach((n) => { n.disabled = dis; });
+
+  async function checkDate() {
+    banner.innerHTML = ''; errBox.textContent = ''; existing = null; editing = false;
+    const date = dateI.value;
+    lockFields(false); btn.style.display = ''; btn.textContent = 'Submit report';
+    if (!date) { btn.style.display = 'none'; return; }
+    let snap;
+    try { snap = await getDoc(doc(db, 'submissions', subId(date))); }
+    catch { return; } // if the lookup fails, fall back to a normal submit
+    if (!snap.exists()) { clearAnswers(); return; }
+    // Already reported for this date → offer Modify or Delete.
+    existing = { id: snap.id, ...snap.data() };
+    lockFields(true); btn.style.display = 'none';
+    const note = el('div', { class: 'muted', style: 'margin-bottom:8px' }, `You already reported for ${date}. You can modify or delete it.`);
+    const modBtn = el('button', { type: 'button', class: 'btn', onclick: () => {
+      editing = true; lockFields(false); applyAnswers(existing);
+      btn.style.display = ''; btn.textContent = 'Save changes';
+      note.textContent = `Editing your report for ${date} — change the answers and Save.`;
+    } }, 'Modify');
+    const delBtn = el('button', { type: 'button', class: 'btn danger', onclick: async () => {
+      if (!confirm(`Delete your report for ${date}?`)) return;
+      try { await deleteDoc(doc(db, 'submissions', existing.id)); toast('Report deleted'); checkDate(); }
+      catch (e) { toast(friendlyError(e), true); }
+    } }, 'Delete');
+    banner.append(el('div', { class: 'card', style: 'background:#f0f6ff;padding:12px;margin:10px 0' },
+      note, el('div', { class: 'inline' }, modBtn, delBtn)));
+  }
+  dateI.addEventListener('change', checkDate);
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     errBox.textContent = '';
+    const date = dateI.value;
+    if (!date) { errBox.textContent = 'Please choose the date of reporting.'; return; }
     for (const { q, get } of inputs) {
       const v = get();
       const empty = v == null || (Array.isArray(v) ? v.length === 0 : String(v).trim() === '');
@@ -354,7 +402,7 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
     }
     btn.disabled = true;
     try {
-      await addDoc(colRef('submissions'), {
+      await setDoc(doc(db, 'submissions', subId(date)), {
         uniqueId,
         userId: codeData.userId,
         userName: codeData.name || '',
@@ -363,6 +411,7 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
         questionnaireTitle: qn.title,
         departmentId: codeData.departmentId ?? null,
         deptPath: codeData.deptPath ?? null,
+        reportDate: date,
         answers: inputs.map(({ q, get }) => ({
           questionId: q.id, question: q.text,
           value: Array.isArray(get()) ? get().join(', ') : String(get()),
@@ -371,8 +420,8 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
       });
       container.innerHTML = '';
       container.append(el('div', { class: 'card', style: 'text-align:center;margin-top:16px' },
-        el('h2', {}, '✓ Report submitted'),
-        el('p', { class: 'muted' }, 'Thank you. Your report has been recorded.'),
+        el('h2', {}, editing ? '✓ Report updated' : '✓ Report submitted'),
+        el('p', { class: 'muted' }, `Recorded for ${date}.`),
         el('button', { class: 'btn', onclick: () => renderPublic() }, 'Done')));
     } catch (err) {
       errBox.textContent = friendlyError(err);
@@ -380,34 +429,37 @@ function renderReportForm(uniqueId, codeData, entry, qn, container) {
     }
   });
   container.append(form);
+  checkDate();
 }
 
 function fieldFor(q) {
   const label = el('label', {}, q.text + (q.required ? ' *' : ''));
-  let getter;
+  let getter, setter = () => {};
   const opts = q.options || [];
-  if (q.type === 'textarea') { const i = el('textarea', {}); label.append(i); getter = () => i.value; }
-  else if (q.type === 'number') { const i = el('input', { type: 'number', step: 'any' }); label.append(i); getter = () => i.value; }
-  else if (q.type === 'date') { const i = el('input', { type: 'date' }); label.append(i); getter = () => i.value; }
+  if (q.type === 'textarea') { const i = el('textarea', {}); label.append(i); getter = () => i.value; setter = (v) => { i.value = v || ''; }; }
+  else if (q.type === 'number') { const i = el('input', { type: 'number', step: 'any' }); label.append(i); getter = () => i.value; setter = (v) => { i.value = v || ''; }; }
+  else if (q.type === 'date') { const i = el('input', { type: 'date' }); label.append(i); getter = () => i.value; setter = (v) => { i.value = v || ''; }; }
   else if (q.type === 'select') {
     const s = el('select', {}, el('option', { value: '' }, '— choose —'), ...opts.map((o) => el('option', { value: o }, o)));
-    label.append(s); getter = () => s.value;
+    label.append(s); getter = () => s.value; setter = (v) => { s.value = v || ''; };
   } else if (q.type === 'radio') {
     const w = el('div', { class: 'checkbox-list' });
     const name = 'r' + Math.random().toString(36).slice(2);
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'radio', name, value: o }), o)));
     label.append(w); getter = () => (w.querySelector('input:checked') || {}).value || '';
+    setter = (v) => { const t = Array.from(w.querySelectorAll('input')).find((i) => i.value === v); if (t) t.checked = true; };
   } else if (q.type === 'checkbox') {
     const w = el('div', { class: 'checkbox-list' });
     opts.forEach((o) => w.append(el('label', {}, el('input', { type: 'checkbox', value: o }), o)));
     label.append(w); getter = () => Array.from(w.querySelectorAll('input:checked')).map((c) => c.value);
+    setter = (v) => { const want = new Set(String(v || '').split(',').map((s) => s.trim())); w.querySelectorAll('input').forEach((i) => { i.checked = want.has(i.value); }); };
   } else if (q.type === 'table') {
     label.textContent = '';
     label.style.fontWeight = '400';
-    const { node, get } = tableField(q.text + (q.required ? ' *' : ''), q.options, !!q.multiRow);
-    label.append(node); getter = get;
-  } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; }
-  return { node: label, get: getter };
+    const { node, get, set } = tableField(q.text + (q.required ? ' *' : ''), q.options, !!q.multiRow);
+    label.append(node); getter = get; setter = set;
+  } else { const i = el('input', { type: 'text' }); label.append(i); getter = () => i.value; setter = (v) => { i.value = v || ''; }; }
+  return { node: label, get: getter, set: setter };
 }
 
 /** Build a grid input: a title spanning the top, `columns` as a header row, and
@@ -448,7 +500,19 @@ function tableField(titleText, columns, multi) {
     .filter((cells) => cells.some(([, v]) => v !== ''))
     .map((cells) => cells.map(([c, v]) => `${c}: ${v}`).join(', '))
     .join('\n');
-  return { node: wrap, get };
+  // Parse the serialised "Col: value, ..." lines back into the grid.
+  const set = (v) => {
+    const lines = String(v || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) return;
+    while (rows.length < lines.length && multi) addRow();
+    lines.forEach((line, r) => {
+      const rec = rows[r]; if (!rec) return;
+      const map = {};
+      line.split(',').forEach((p) => { const m = p.match(/^\s*(.+?):\s*(.*)$/); if (m) map[m[1].trim()] = m[2].trim(); });
+      rec.inputs.forEach((inp, i) => { if (map[cols[i]] != null) inp.value = map[cols[i]]; });
+    });
+  };
+  return { node: wrap, get, set };
 }
 
 /* ------------------------------------------------------------------ *
