@@ -23,9 +23,29 @@
   <div id="toast" class="toast hidden"></div>
   <script type="module" src="app.js"></script>
   <script>
+    // Always load the freshest deploy: never cache the SW script, check for a
+    // new version on every open and whenever the tab regains focus, and reload
+    // automatically the moment a new version takes over.
     if ('serviceWorker' in navigator) {
+      var hadController = !!navigator.serviceWorker.controller;
+      var refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (refreshing || !hadController) return; // skip the very first install
+        refreshing = true;
+        window.location.reload();
+      });
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('/sw.js').catch(function () {});
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+          .then(function (reg) {
+            reg.update();
+            setInterval(function () { reg.update(); }, 60000);
+          })
+          .catch(function () {});
+      });
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          navigator.serviceWorker.getRegistration().then(function (r) { if (r) r.update(); }).catch(function () {});
+        }
       });
     }
   </script>
