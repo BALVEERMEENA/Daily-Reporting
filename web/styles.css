@@ -224,3 +224,11 @@ tr:last-child td { border-bottom: none; }
 .perf-line.perf-excellent { background: none; color: #15803d; }
 .perf-line.perf-good { background: none; color: #b45309; }
 .perf-line.perf-below { background: none; color: #b91c1c; }
+
+/* Daily reporting tracker chips */
+.daychips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+.daychip { flex: 0 0 auto; min-width: 68px; text-align: center; border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 8px 6px; cursor: pointer; color: var(--ink); }
+.daychip.perf-excellent { border-color: #86efac; background: #dcfce7; }
+.daychip.perf-good { border-color: #fde68a; background: #fef9c3; }
+.daychip.perf-below { border-color: #fecaca; background: #fee2e2; }
+.daychip.active { outline: 2px solid var(--primary); outline-offset: 1px; }
