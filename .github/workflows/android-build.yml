@@ -1,0 +1,57 @@
+name: Build Android APK
+
+# Builds the installable Android APK (the Trusted Web Activity wrapper) and
+# publishes it to a stable GitHub Release you can download from your phone —
+# no Android Studio needed. Runs when the android/ project changes on main, or
+# on demand from the Actions tab (Run workflow).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Upload APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-reporting-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      # Publish to a fixed "android-latest" release so there is always one
+      # stable download link for the newest build.
+      - name: Publish to the android-latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk daily-reporting.apk
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest daily-reporting.apk \
+            --title "Daily Reporting — Android (latest)" \
+            --notes "Installable Android app built from ${GITHUB_SHA}. On your phone: download daily-reporting.apk, allow your browser to install unknown apps if prompted, then open it to install. The app opens the live site https://dr2785.web.app."
