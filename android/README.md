@@ -6,6 +6,21 @@ native app simply opens your PWA full‑screen (no browser address bar) and alwa
 shows the latest deploy — you don't rebuild the Android app when the website
 changes.
 
+## Download the built app (no Android Studio, phone-friendly)
+
+Every change to the `android/` project builds an installable APK automatically
+(GitHub Actions → **Build Android APK**). You can also trigger it by hand from
+the **Actions** tab → *Build Android APK* → *Run workflow*.
+
+Download the newest build straight to your phone here:
+
+**https://github.com/BALVEERMEENA/Daily-Reporting/releases/tag/android-latest**
+
+Tap `daily-reporting.apk`, allow your browser to install unknown apps if asked,
+then open the file to install. The app opens the live site
+(https://dr2785.web.app). This is a **debug** build — fine for installing on
+your own phones. For Google Play you still make a signed release (see below).
+
 ## Get it onto your PC
 
 I can't write to your computer directly, so this project lives inside the repo.
