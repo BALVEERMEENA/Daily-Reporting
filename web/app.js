@@ -1733,6 +1733,10 @@ function taskMeta(t) {
 function taskUpdateControls(task, ctx, onDone) {
   const wrap = el('div', {});
   const err = el('div', { class: 'error' });
+  // The date this update is FOR (defaults to today, never future). Reporting is
+  // attributed to this date, not the day the update happened to be logged.
+  const dateI = el('input', { type: 'date', required: true, value: localYmd(), max: localYmd() });
+  const dateNode = el('label', {}, 'Date of reporting *', dateI);
   // Optional data table attached to the task (columns defined when assigned).
   const tf = (task.tableColumns && task.tableColumns.length)
     ? tableField(task.tableTitle || 'Details', task.tableColumns, !!task.tableMultiRow) : null;
@@ -1741,49 +1745,54 @@ function taskUpdateControls(task, ctx, onDone) {
   if (task.type === 'pendency') {
     const completed = el('input', { type: 'number', min: '0', step: '1', value: '0' });
     const added = el('input', { type: 'number', min: '0', step: '1', value: '0' });
-    const workDone = el('textarea', { placeholder: 'What work did you do today? (optional)' });
+    const workDone = el('textarea', { placeholder: 'What work did you do? (optional)' });
     const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
     btn.addEventListener('click', async () => {
       err.textContent = '';
+      if (!dateI.value) { err.textContent = 'Please choose the date of reporting.'; return; }
       const c = Math.max(0, parseInt(completed.value || '0', 10) || 0);
       const a = Math.max(0, parseInt(added.value || '0', 10) || 0);
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed: c, added: a, workDone: workDone.value.trim(), table: tableVal() }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed: c, added: a, workDone: workDone.value.trim(), table: tableVal(), reportDate: dateI.value }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
       el('p', {}, 'Currently pending: ', el('strong', {}, String(task.pendency ?? 0))),
+      dateNode,
       el('div', { class: 'inline' },
-        el('label', { style: 'flex:1' }, 'Completed today', completed),
+        el('label', { style: 'flex:1' }, 'Completed', completed),
         el('label', { style: 'flex:1' }, 'Newly added', added)),
       tableNode,
-      el('label', {}, 'Work done today', workDone),
+      el('label', {}, 'Work done', workDone),
       btn, err);
   } else {
     const grp = 'ot' + task.id;
     const doneR = el('input', { type: 'radio', name: grp, value: 'completed' });
     const pendR = el('input', { type: 'radio', name: grp, value: 'pending', checked: true });
-    const workDone = el('textarea', { placeholder: 'What work did you do today?' });
+    const workDone = el('textarea', { placeholder: 'What work did you do?' });
     const btn = el('button', { class: 'btn primary', style: 'width:auto' }, 'Update');
     btn.addEventListener('click', async () => {
       err.textContent = '';
+      if (!dateI.value) { err.textContent = 'Please choose the date of reporting.'; return; }
       const completed = doneR.checked;
       const note = workDone.value.trim();
       if (!completed && !note) { err.textContent = 'Please describe the work done, or why it is still pending.'; return; }
       btn.disabled = true;
-      try { await commitTaskUpdate(task, ctx, { completed, reason: note, workDone: note, table: tableVal() }); onDone && onDone(); }
+      try { await commitTaskUpdate(task, ctx, { completed, reason: note, workDone: note, table: tableVal(), reportDate: dateI.value }); onDone && onDone(); }
       catch (e) { err.textContent = friendlyError(e); btn.disabled = false; }
     });
     wrap.append(
+      dateNode,
       el('div', { class: 'checkbox-list' }, el('label', {}, doneR, ' Completed'), el('label', {}, pendR, ' Still pending')),
       tableNode,
-      el('label', {}, 'Work done today', workDone), btn, err);
+      el('label', {}, 'Work done', workDone), btn, err);
   }
   return wrap;
 }
 
 async function commitTaskUpdate(task, ctx, data) {
-  const today = new Date().toISOString().slice(0, 10);
+  // Attribute the update to the chosen reporting date (fallback: today).
+  const today = data.reportDate || new Date().toISOString().slice(0, 10);
   const uniqueId = (ctx && ctx.uniqueId) || task.assignedUniqueId;
   const batch = writeBatch(db);
   const taskRef = doc(db, 'tasks', task.id);
