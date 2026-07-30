@@ -1592,12 +1592,82 @@ async function renderSchedule() {
 }
 
 /* ---- Pendency: clear staff-wise and task-wise tracking ---- */
+async function loadTaskUpdates() {
+  if (state.user.role === 'admin') return getAll('taskUpdates').catch(() => []);
+  if (state.user.role === 'dept_head') return getSubtree('taskUpdates').catch(() => []);
+  return [];
+}
+
+// The last-7-days reporting tracker: chips per day with received/expected, and
+// a detail list of who reported / didn't when a day is tapped. A questionnaire
+// submission OR a task update on a day both count as "reported".
+function dailyReportingSection(tasks, submissions, assignments, users, taskUpdates) {
+  const nameById = {};
+  users.forEach((u) => { nameById[u.id] = u.name; });
+  submissions.forEach((r) => { if (r.userId && !nameById[r.userId]) nameById[r.userId] = r.userName || r.userId; });
+  tasks.forEach((t) => { if (t.assignedTo && !nameById[t.assignedTo]) nameById[t.assignedTo] = t.assignedToName || t.assignedTo; });
+
+  const days = [];
+  for (let i = 6; i >= 0; i--) days.push(localYmd(new Date(Date.now() - i * 86400000)));
+  const reportedByDay = {}; days.forEach((d) => { reportedByDay[d] = new Set(); });
+  submissions.forEach((r) => { const d = subYmd(r); if (reportedByDay[d]) reportedByDay[d].add(r.userId); });
+  taskUpdates.forEach((u) => { if (reportedByDay[u.date]) reportedByDay[u.date].add(u.userId); });
+
+  // Expected reporters = anyone assigned a questionnaire or a task (plus anyone
+  // who actually reported in the window, so nobody is missed).
+  const expected = new Map();
+  assignments.forEach((a) => { if (a.userId) expected.set(a.userId, nameById[a.userId] || a.userName || a.userId); });
+  tasks.forEach((t) => { if (t.assignedTo) expected.set(t.assignedTo, nameById[t.assignedTo] || t.assignedToName || t.assignedTo); });
+  Object.values(reportedByDay).forEach((set) => set.forEach((id) => { if (!expected.has(id)) expected.set(id, nameById[id] || id); }));
+  const expectedIds = [...expected.keys()];
+
+  const nameOf = (id) => nameById[id] || expected.get(id) || id;
+  const fullDay = (ymd) => new Date(ymd + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+
+  const detail = el('div', { class: 'tile', style: 'margin-top:12px' });
+  const showDay = (d) => {
+    const rec = expectedIds.filter((id) => reportedByDay[d].has(id)).map(nameOf).sort();
+    const no = expectedIds.filter((id) => !reportedByDay[d].has(id)).map(nameOf).sort();
+    detail.innerHTML = '';
+    detail.append(
+      el('div', { style: 'font-weight:700;margin-bottom:8px' }, fullDay(d)),
+      el('div', { class: 'perf-line perf-excellent' }, el('strong', {}, `✓ Reported (${rec.length}): `), rec.length ? rec.join(', ') : '—'),
+      el('div', { class: 'perf-line perf-below', style: 'margin-top:6px' }, el('strong', {}, `✗ Not reported (${no.length}): `), no.length ? no.join(', ') : '—'));
+  };
+
+  const chipRow = el('div', { class: 'daychips' });
+  const chips = [];
+  days.forEach((d) => {
+    const rec = expectedIds.filter((id) => reportedByDay[d].has(id)).length;
+    const total = expectedIds.length;
+    const tier = total === 0 ? '' : rec === total ? 'perf-excellent' : rec === 0 ? 'perf-below' : 'perf-good';
+    const dt = new Date(d + 'T00:00:00');
+    const chip = el('button', { class: 'daychip ' + tier, onclick: () => { chips.forEach((c) => c.classList.remove('active')); chip.classList.add('active'); showDay(d); } },
+      el('div', { style: 'font-size:12px' }, dt.toLocaleDateString(undefined, { weekday: 'short' })),
+      el('div', { style: 'font-weight:700' }, dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })),
+      el('div', { style: 'font-size:12px' }, `${rec}/${total}`));
+    chips.push(chip); chipRow.append(chip);
+  });
+  // default to today (last chip)
+  if (chips.length) { chips[chips.length - 1].classList.add('active'); showDay(days[days.length - 1]); }
+
+  return [
+    el('h3', { style: 'margin:4px 0 8px' }, 'Daily reporting — last 7 days'),
+    el('p', { class: 'muted', style: 'margin:0 0 10px;font-size:13px' }, 'Received = the person submitted a report or updated a task that day. Tap a day for who did and didn’t report.'),
+    chipRow, detail,
+  ];
+}
+
 async function renderPendency() {
   await withPage(async () => {
-    const tasks = await listTasks();
-    const pend = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed');
+    const [tasks, submissions, assignments, users, taskUpdates] = await Promise.all([
+      listTasks(), listReports().catch(() => []), listAssignments().catch(() => []),
+      listUsers().catch(() => []), loadTaskUpdates(),
+    ]);
     const head = pageHead('Pendency');
-    if (!pend.length) return [head, el('div', { class: 'empty' }, 'No open quantity tasks. Pendency shows here once a quantity task is assigned.')];
+    const tracker = dailyReportingSection(tasks, submissions, assignments, users, taskUpdates);
+    const pend = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed');
+    if (!pend.length) return [head, ...tracker, el('div', { class: 'empty', style: 'margin-top:20px' }, 'No open quantity tasks yet.')];
 
     // ----- By staff -----
     const byStaff = new Map();
@@ -1634,7 +1704,8 @@ async function renderPendency() {
     });
 
     return [head,
-      el('h3', { style: 'margin:4px 0 8px' }, 'By staff'),
+      ...tracker,
+      el('h3', { style: 'margin:24px 0 8px' }, 'By staff'),
       el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Staff'), el('th', {}, 'Open tasks'), el('th', {}, 'Pending'))), staffBody),
       el('h3', { style: 'margin:24px 0 8px' }, 'By task'),
       el('p', { class: 'muted', style: 'margin:0 0 10px;font-size:13px' }, 'Started = original count · Done = net completed so far · Pending = still open. Tap History for the day-by-day log of work done.'),
