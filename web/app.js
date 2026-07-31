@@ -706,53 +706,78 @@ function infoModal(title, contentNode) {
 /* ---- Dashboard ---- */
 async function renderDashboard() {
   await withPage(async () => {
-    const [reports, assignments, users] = await Promise.all([
-      listReports(), listAssignments().catch(() => []), listUsers().catch(() => []),
-    ]);
     const today = localYmd();
+    const [reports, assignments, users, exemptions] = await Promise.all([
+      listReports(), listAssignments().catch(() => []), listUsers().catch(() => []),
+      getWhere('exemptions', 'date', today).catch(() => []),
+    ]);
     const byId = Object.fromEntries(users.map((u) => [u.id, u]));
+    const exemptSet = new Set(exemptions.map((e) => e.userId));
 
-    // Who is expected to report (assigned a questionnaire) and hasn't today.
-    const expected = [...new Set(assignments.map((a) => a.userId).filter(Boolean))];
+    // Expected = assigned a questionnaire AND marked mandatory (default yes).
+    const expected = [...new Set(assignments.map((a) => a.userId).filter(Boolean))]
+      .filter((id) => !byId[id] || byId[id].reportingRequired !== false);
     const reportedToday = new Set(reports.filter((r) => (r.reportDate || submittedYmd(r)) === today).map((r) => r.userId));
-    const pending = expected.filter((id) => !reportedToday.has(id))
-      .map((id) => byId[id] || { id, name: (assignments.find((a) => a.userId === id) || {}).userName || id })
-      .sort((a, b) => String(a.name || '').localeCompare(b.name || ''));
-    const doneCount = expected.length - pending.length;
+    const toUser = (id) => byId[id] || { id, name: (assignments.find((a) => a.userId === id) || {}).userName || id };
+    const pending = expected.filter((id) => !reportedToday.has(id) && !exemptSet.has(id))
+      .map(toUser).sort((a, b) => String(a.name || '').localeCompare(b.name || ''));
+    const exempted = expected.filter((id) => exemptSet.has(id) && !reportedToday.has(id)).map(toUser);
+    const doneCount = expected.filter((id) => reportedToday.has(id)).length;
 
     const head = pageHead(`Welcome, ${state.user.name}`);
     const summary = el('div', { class: 'tile', style: 'margin-bottom:14px' },
       el('div', { style: 'font-size:15px' }, 'Reported today: ', el('strong', {}, `${doneCount} / ${expected.length}`),
-        expected.length ? el('span', { class: 'muted' }, `  ·  ${pending.length} pending`) : el('span', { class: 'muted' }, '  ·  no one is assigned a report yet')));
+        expected.length ? el('span', { class: 'muted' }, `  ·  ${pending.length} pending${exempted.length ? '  ·  ' + exempted.length + ' on leave' : ''}`) : el('span', { class: 'muted' }, '  ·  no one is assigned a report yet')));
 
     const recent = [
       el('h3', { style: 'margin:24px 0 8px' }, 'Recent reports'),
       reportsTable(reports.slice(0, 8)),
     ];
+    const exemptedBlock = exempted.length ? [
+      el('h3', { style: 'margin:22px 0 8px' }, `On leave / exempt today (${exempted.length})`),
+      el('div', { class: 'inline', style: 'gap:8px;flex-wrap:wrap' }, ...exempted.sort((a, b) => String(a.name).localeCompare(b.name)).map((u) =>
+        el('span', { class: 'pill', style: 'background:#e2e8f0;color:#334155' }, u.name || u.id, ' ',
+          el('a', { href: '#', style: 'color:#334155', title: 'Undo', onclick: (e) => { e.preventDefault(); unexemptToday(u.id, today); } }, '✕')))),
+    ] : [];
 
     if (!pending.length) {
       return [head, summary,
-        el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today.' : 'Assign a questionnaire to start tracking daily reporting.'),
-        ...recent];
+        el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today (or is on leave).' : 'Assign a questionnaire to start tracking daily reporting.'),
+        ...exemptedBlock, ...recent];
     }
 
-    const reminderText = (name) => `Hello ${name || ''}, please submit your daily report for ${today}. Thank you.`;
+    const reminder = `kindly Submit your daily report for ${today}.`;
     const tbody = el('tbody');
     pending.forEach((u) => {
-      const wa = waLink(u.mobile, reminderText(u.name));
+      const wa = waLink(u.mobile, reminder);
       tbody.append(el('tr', {},
         el('td', {}, el('strong', {}, u.name || '—')),
         el('td', {}, u.mobile ? el('span', { class: 'muted' }, u.mobile) : el('span', { class: 'muted' }, 'no number')),
-        el('td', {}, wa
-          ? el('a', { class: 'btn small', style: 'background:#dcfce7;color:#15803d', href: wa, target: '_blank', rel: 'noopener' }, '🟢 WhatsApp reminder')
-          : el('span', { class: 'muted', style: 'font-size:13px' }, 'Add a mobile number in Users'))));
+        el('td', {}, el('div', { class: 'row-actions' },
+          wa ? el('a', { class: 'btn small', style: 'background:#dcfce7;color:#15803d', href: wa, target: '_blank', rel: 'noopener' }, '🟢 WhatsApp')
+            : el('span', { class: 'muted', style: 'font-size:13px' }, 'no number'),
+          el('button', { class: 'btn ghost small', title: 'Exempt from reporting today (on leave etc.)', onclick: () => exemptToday(u, today) }, 'On leave')))));
     });
     return [head, summary,
       el('h3', { style: 'margin:4px 0 8px' }, `Today’s reporting pending (${pending.length})`),
-      el('p', { class: 'muted', style: 'font-size:13px;margin:0 0 10px' }, 'Employees assigned a report who haven’t submitted for today. Tap WhatsApp to send a reminder.'),
-      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Remind'))), tbody),
-      ...recent];
+      el('p', { class: 'muted', style: 'font-size:13px;margin:0 0 10px' }, 'Employees assigned a report who haven’t submitted for today. Send a WhatsApp reminder, or mark “On leave” to exempt them for today.'),
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Action'))), tbody),
+      ...exemptedBlock, ...recent];
   });
+}
+// Exempt a staff member from today's reporting (e.g. on leave) — dashboard.
+async function exemptToday(u, date) {
+  try {
+    await setDoc(doc(db, 'exemptions', `${date}__${u.id}`), {
+      userId: u.id, userName: u.name || '', date, deptPath: u.deptPath || [],
+      by: state.user.uid, byName: state.user.name, createdAt: serverTimestamp(),
+    });
+    toast(`${u.name || 'Staff'} exempted for ${date}`); renderDashboard();
+  } catch (e) { toast(friendlyError(e), true); }
+}
+async function unexemptToday(userId, date) {
+  try { await deleteDoc(doc(db, 'exemptions', `${date}__${userId}`)); toast('Exemption removed'); renderDashboard(); }
+  catch (e) { toast(friendlyError(e), true); }
 }
 function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
 
@@ -866,7 +891,7 @@ async function renderUsers(teamOnly) {
       el('td', {}, el('span', { class: 'code-chip' }, u.uniqueId || '—'),
         u.uniqueId ? el('button', { class: 'btn ghost small', style: 'margin-left:6px', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(u.uniqueId); toast('Copied ' + u.uniqueId); } }, 'Copy') : null),
       el('td', {}, u.mobile
-        ? el('a', { href: waLink(u.mobile, `Hello ${u.name || ''}`), target: '_blank', rel: 'noopener' }, u.mobile)
+        ? el('a', { href: waLink(u.mobile, `kindly Submit your daily report for ${localYmd()}.`), target: '_blank', rel: 'noopener' }, u.mobile)
         : el('span', { class: 'muted' }, '—')),
       el('td', {}, el('span', { class: 'pill ' + u.role }, u.role.replace('_', ' '))),
       el('td', {}, deptName(u.departmentId)),
@@ -885,6 +910,7 @@ function userModal(user, departments) {
   const name = el('input', { value: user ? user.name : '', required: true });
   const uniqueId = el('input', { value: user ? user.uniqueId || '' : '', placeholder: 'e.g. EMP001', ...(editing ? { disabled: true } : { required: true }) });
   const mobile = el('input', { type: 'tel', value: user ? user.mobile || '' : '', placeholder: 'with country code, e.g. 9198XXXXXXXX' });
+  const reqReport = el('input', { type: 'checkbox', ...((user ? user.reportingRequired !== false : true) ? { checked: true } : {}) });
   const role = el('select', {}, ...['employee', 'dept_head', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r }, r.replace('_', ' '))));
   const dept = el('select', {}, el('option', { value: '' }, '— none —'), ...departments.map((d) => el('option', { value: d.id, selected: user && user.departmentId === d.id }, d.name)));
   const email = el('input', { type: 'email', value: user ? user.email || '' : '', ...(editing ? { disabled: true } : {}) });
@@ -900,13 +926,14 @@ function userModal(user, departments) {
     el('label', {}, 'Name', name),
     el('label', {}, 'Unique ID (used for reporting)', uniqueId),
     el('label', {}, 'Mobile number (for WhatsApp reminders)', mobile),
+    el('label', { style: 'font-weight:400' }, reqReport, ' Daily reporting mandatory (appears in pending list)'),
     isAdmin ? el('label', {}, 'Role', role) : null,
     isAdmin ? el('label', {}, 'Department', dept) : null,
     loginSection);
 
   modal(editing ? 'Edit user' : 'Add user', content, async () => {
     if (editing) {
-      const patch = { name: name.value.trim(), mobile: mobile.value.trim() || null };
+      const patch = { name: name.value.trim(), mobile: mobile.value.trim() || null, reportingRequired: reqReport.checked };
       if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; patch.deptPath = deptPathOf(dept.value || null, departments); }
       await updateDoc(doc(db, 'users', user.id), patch);
       // keep the reporting-code doc's name/department in sync
@@ -939,7 +966,7 @@ function userModal(user, departments) {
     const batch = writeBatch(db);
     batch.set(doc(db, 'users', docId), {
       name: name.value.trim(), uniqueId: uid, role: newRole, departmentId: newDept, deptPath: newDeptPath,
-      mobile: mobile.value.trim() || null,
+      mobile: mobile.value.trim() || null, reportingRequired: reqReport.checked,
       authUid, email: wantsLogin ? email.value.trim() : null, createdAt: serverTimestamp(),
     });
     batch.set(doc(db, 'codes', uid), {
