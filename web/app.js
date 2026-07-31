@@ -1602,10 +1602,58 @@ function businessTotals(reports) {
   }));
   return map;
 }
-function businessReportText(date, scope, nReports, nStaff, lines) {
-  const L = [`Branches daily business report — ${date}`, `Scope: ${scope}`, `Reports included: ${nReports} from ${nStaff} staff`, ''];
-  lines.forEach(([f, v]) => L.push(`${f}: ${fmtNum(v)}`));
-  return L.join('\n');
+/* ---- Tiny client-side .xlsx (Excel) writer — no libraries ---- */
+function crc32(bytes) { let c = ~0; for (let i = 0; i < bytes.length; i++) { c ^= bytes[i]; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1)); } return (~c) >>> 0; }
+function zipStore(files) {
+  const enc = (s) => new TextEncoder().encode(s);
+  const u16 = (n) => [n & 255, (n >> 8) & 255];
+  const u32 = (n) => [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255];
+  const chunks = [], central = []; let offset = 0;
+  for (const f of files) {
+    const name = enc(f.name), data = f.data, crc = crc32(data);
+    const lh = [0x50, 0x4b, 0x03, 0x04, ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)];
+    const lb = new Uint8Array(lh.length + name.length + data.length); lb.set(lh, 0); lb.set(name, lh.length); lb.set(data, lh.length + name.length); chunks.push(lb);
+    const ch = [0x50, 0x4b, 0x01, 0x02, ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)];
+    const cb = new Uint8Array(ch.length + name.length); cb.set(ch, 0); cb.set(name, ch.length); central.push(cb); offset += lb.length;
+  }
+  const cs = central.reduce((s, c) => s + c.length, 0);
+  const eo = [0x50, 0x4b, 0x05, 0x06, ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cs), ...u32(offset), ...u16(0)];
+  const parts = [...chunks, ...central, new Uint8Array(eo)];
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let p = 0; for (const pt of parts) { out.set(pt, p); p += pt.length; }
+  return out;
+}
+function colLetter(i) { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = (i - m - 1) / 26; } return s; }
+// rows: array of arrays; a numeric cell becomes a real number, everything else text.
+function xlsxBlob(rows) {
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rowsXml = rows.map((row, ri) => `<row r="${ri + 1}">` + row.map((cell, ci) => {
+    const ref = colLetter(ci) + (ri + 1);
+    if (typeof cell === 'number' && isFinite(cell)) return `<c r="${ref}" t="n"><v>${cell}</v></c>`;
+    return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(cell == null ? '' : cell)}</t></is></c>`;
+  }).join('') + '</row>').join('');
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowsXml}</sheetData></worksheet>`;
+  const ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const wb = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const wbr = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`;
+  const enc = (s) => new TextEncoder().encode(s);
+  const bytes = zipStore([
+    { name: '[Content_Types].xml', data: enc(ct) }, { name: '_rels/.rels', data: enc(rels) },
+    { name: 'xl/workbook.xml', data: enc(wb) }, { name: 'xl/_rels/workbook.xml.rels', data: enc(wbr) },
+    { name: 'xl/worksheets/sheet1.xml', data: enc(sheet) },
+  ]);
+  return new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+function downloadBlob(name, blob) { const u = URL.createObjectURL(blob); const a = el('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(u); }
+// Share the file via the OS share sheet (so it can be attached in an email /
+// messaging app). Falls back to downloading it (+ opening the mail composer).
+async function shareOrEmailFile(name, blob, subject, body, forceEmail) {
+  try {
+    const file = new File([blob], name, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: subject, text: body }); return; }
+  } catch { return; /* user cancelled */ }
+  downloadBlob(name, blob);
+  if (forceEmail) window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body + '\n\n(The Excel file has been downloaded — attach it to this email.)')}`;
 }
 // The editable field list + mapping lives in settings/businessReport. Each
 // field is { label, source } where source is the questionnaire question/column
@@ -1684,16 +1732,26 @@ async function renderBusinessReport() {
       const lines = fields.map((f) => [f.label, totals[normLabel(f.source || f.label)] ?? 0]);
       const matched = lines.filter(([, v]) => v !== 0).length;
       const scopeName = dep ? ((departments.find((x) => x.id === dep) || {}).name || 'Branch') : 'All branches (cumulative)';
-      const text = businessReportText(d, scopeName, rows.length, nStaff, lines);
+      // Spreadsheet rows (numbers stay numeric); Copy uses the same as TSV.
+      const sheetRows = [
+        ['Branches daily business report'],
+        ['Business date', d], ['Scope', scopeName], ['Reports', `${rows.length} from ${nStaff} staff`],
+        [], ['#', 'Metric', 'Cumulative'],
+        ...lines.map(([f, v], i) => [i + 1, f, v]),
+      ];
+      const fileName = `business-report-${d}.xlsx`;
+      const subject = 'Branches daily business report — ' + d;
+      const body = `${subject} (${scopeName}). ${rows.length} report(s) from ${nStaff} staff.`;
+      const makeXlsx = () => xlsxBlob(sheetRows);
+      const tsv = sheetRows.map((r) => r.map((c) => (c == null ? '' : String(c))).join('\t')).join('\n');
 
-      const emailUrl = `mailto:?subject=${encodeURIComponent('Branches daily business report — ' + d)}&body=${encodeURIComponent(text)}`;
       out.append(el('div', { class: 'tile', style: 'margin-bottom:12px' },
         el('div', {}, el('strong', {}, `${rows.length} report(s)`), ` from ${nStaff} staff · ${matched}/${fields.length} fields with data`),
         el('div', { class: 'inline', style: 'margin-top:10px;gap:8px;flex-wrap:wrap' },
-          el('a', { class: 'btn primary', style: 'width:auto', href: emailUrl }, '✉ Email'),
-          el('button', { class: 'btn', style: 'width:auto', onclick: async () => { try { await navigator.clipboard.writeText(text); toast('Report copied'); } catch { toast('Copy failed', true); } } }, '⧉ Copy'),
-          el('button', { class: 'btn', style: 'width:auto', onclick: () => { const b = new Blob([text], { type: 'text/plain' }); const u = URL.createObjectURL(b); const a = el('a', { href: u, download: `business-report-${d}.txt` }); document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(u); } }, '⭳ Download'),
-          navigator.share ? el('button', { class: 'btn', style: 'width:auto', onclick: () => navigator.share({ title: 'Business report', text }).catch(() => {}) }, '⤴ Share') : null)));
+          el('button', { class: 'btn primary', style: 'width:auto', onclick: () => shareOrEmailFile(fileName, makeXlsx(), subject, body, true) }, '✉ Email (Excel)'),
+          el('button', { class: 'btn', style: 'width:auto', onclick: async () => { try { await navigator.clipboard.writeText(tsv); toast('Copied (paste into Excel)'); } catch { toast('Copy failed', true); } } }, '⧉ Copy'),
+          el('button', { class: 'btn', style: 'width:auto', onclick: () => downloadBlob(fileName, makeXlsx()) }, '⭳ Download (Excel)'),
+          navigator.share ? el('button', { class: 'btn', style: 'width:auto', onclick: () => shareOrEmailFile(fileName, makeXlsx(), subject, body, false) }, '⤴ Share (Excel)') : null)));
 
       if (!rows.length) { out.append(el('div', { class: 'empty' }, 'No reports for this date and scope yet.')); return; }
       const tb = el('tbody');
