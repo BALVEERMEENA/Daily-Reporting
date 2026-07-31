@@ -351,7 +351,9 @@ async function renderReporterTasks(uniqueId, codeData, wrap) {
         el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, taskMeta(task)),
         task.status === 'closed'
           ? el('span', { class: 'pill done' }, 'closed')
-          : taskUpdateControls(task, { uniqueId }, rebuild));
+          : task.status === 'awaiting_approval'
+            ? el('span', { class: 'pill pending' }, '✓ Completed — awaiting approval')
+            : taskUpdateControls(task, { uniqueId }, rebuild));
     };
     rebuild();
     wrap.append(card);
@@ -1840,16 +1842,23 @@ async function commitTaskUpdate(task, ctx, data) {
     taskId: task.id, userId: task.assignedTo, uniqueId, departmentId: task.departmentId ?? null,
     deptPath: task.deptPath ?? [], type: task.type, date: today, createdAt: serverTimestamp(),
   };
+  // Completing a task no longer closes it directly — it waits for a manager to
+  // approve (which removes it). Only completion needs approval; ordinary
+  // progress keeps the task open.
+  let completing = false;
   if (task.type === 'pendency') {
     const before = task.pendency ?? 0;
     const after = before - data.completed + data.added;
-    batch.update(taskRef, { pendency: after, status: after <= 0 ? 'closed' : 'open', updatedAt: serverTimestamp(), ...remarkPatch });
+    completing = after <= 0;
+    const newStatus = completing ? 'awaiting_approval' : 'open';
+    batch.update(taskRef, { pendency: after, status: newStatus, updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, completed: data.completed, added: data.added, before, after }));
-    task.pendency = after; task.status = after <= 0 ? 'closed' : 'open';
+    task.pendency = after; task.status = newStatus;
   } else if (data.completed) {
-    batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'closed', updatedAt: serverTimestamp(), ...remarkPatch });
+    completing = true;
+    batch.update(taskRef, { oneTimeStatus: 'completed', completedDate: today, status: 'awaiting_approval', updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, action: 'completed', completedDate: today }));
-    task.oneTimeStatus = 'completed'; task.status = 'closed';
+    task.oneTimeStatus = 'completed'; task.status = 'awaiting_approval';
   } else {
     batch.update(taskRef, { pendingReason: data.reason, updatedAt: serverTimestamp(), ...remarkPatch });
     batch.set(upRef, withRemark({ ...base, action: 'pending', reason: data.reason }));
@@ -1857,7 +1866,7 @@ async function commitTaskUpdate(task, ctx, data) {
   }
   Object.assign(task, remarkPatch); // reflect latest remark/table locally for re-render
   await batch.commit();
-  toast('Task updated');
+  toast(completing ? 'Marked complete — sent for approval' : 'Task updated');
 }
 
 async function renderTasks() {
@@ -1868,20 +1877,27 @@ async function renderTasks() {
     const actions = canAssign ? [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => taskModal(users) }, '+ Assign task')] : [];
     const head = pageHead(isEmployee ? 'My Tasks' : 'Tasks', actions);
     if (!tasks.length) return [head, el('div', { class: 'empty' }, 'No tasks.')];
+    // Tasks awaiting a completion approval float to the top for managers.
+    const ordered = tasks.slice().sort((a, b) => (b.status === 'awaiting_approval') - (a.status === 'awaiting_approval'));
     const tbody = el('tbody');
-    tasks.forEach((t) => {
+    ordered.forEach((t) => {
+      const awaiting = t.status === 'awaiting_approval';
       const progress = t.type === 'pendency'
         ? el('span', {}, `pending ${t.pendency ?? 0}` + (t.initialPendency != null ? ` / start ${t.initialPendency}` : ''))
         : el('span', { class: 'pill ' + (t.oneTimeStatus === 'completed' ? 'done' : 'pending') }, t.oneTimeStatus || 'pending');
+      const statusPill = awaiting ? el('span', { class: 'pill in_progress' }, 'awaiting approval')
+        : el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open');
       tbody.append(el('tr', {},
         el('td', {}, el('div', {}, el('strong', {}, t.title), t.description ? el('div', { class: 'muted' }, t.description) : null,
           el('div', { class: 'muted', style: 'font-size:12px' }, taskMeta(t)))),
         el('td', {}, t.assignedToName || ''),
         el('td', {}, t.type === 'pendency' ? 'quantity' : 'one-time'),
         el('td', {}, progress),
-        el('td', {}, el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open')),
+        el('td', {}, statusPill),
         el('td', {}, el('div', { class: 'row-actions' },
-          t.status !== 'closed' ? el('button', { class: 'btn ghost small', onclick: () => openTaskUpdate(t) }, 'Update') : null,
+          (canAssign && awaiting) ? el('button', { class: 'btn small', style: 'background:#dcfce7;color:#15803d', onclick: () => approveTaskCompletion(t) }, '✓ Approve') : null,
+          (canAssign && awaiting) ? el('button', { class: 'btn ghost small', onclick: () => reopenTask(t) }, 'Reopen') : null,
+          (t.status !== 'closed' && !awaiting) ? el('button', { class: 'btn ghost small', onclick: () => openTaskUpdate(t) }, 'Update') : null,
           canAssign ? el('button', { class: 'btn ghost small', onclick: () => taskEditModal(t) }, 'Edit') : null,
           el('button', { class: 'btn ghost small', onclick: () => taskHistory(t) }, 'History'),
           canAssign ? el('button', { class: 'btn danger small', onclick: () => delTask(t) }, 'Delete') : null))));
@@ -2008,6 +2024,23 @@ async function delTask(t) {
   if (t.assignedUniqueId) batch.update(doc(db, 'codes', t.assignedUniqueId), { tasks: arrayRemove(t.id) });
   await batch.commit();
   toast('Task deleted'); renderTasks();
+}
+
+// Approve a completed task: it is removed (and detached from the person's code).
+async function approveTaskCompletion(t) {
+  if (!confirm(`Approve completion of "${t.title}"? It will be removed from the list.`)) return;
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'tasks', t.id));
+  if (t.assignedUniqueId) batch.update(doc(db, 'codes', t.assignedUniqueId), { tasks: arrayRemove(t.id) });
+  try { await batch.commit(); toast('Approved and removed'); renderTasks(); }
+  catch (e) { toast(friendlyError(e), true); }
+}
+// Reject a completion: send the task back to the employee as open.
+async function reopenTask(t) {
+  const patch = { status: 'open', updatedAt: serverTimestamp() };
+  if (t.type === 'onetime') { patch.oneTimeStatus = 'pending'; patch.completedDate = null; }
+  try { await updateDoc(doc(db, 'tasks', t.id), patch); toast('Sent back to the employee'); renderTasks(); }
+  catch (e) { toast(friendlyError(e), true); }
 }
 
 /* ------------------------------------------------------------------ */
