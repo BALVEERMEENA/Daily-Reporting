@@ -1405,9 +1405,15 @@ async function renderMonitoring() {
     }));
 
     let period = 'month';
+    let staffId = '';
     const results = el('div', {});
     const mkBtn = (p, label) => el('button', { class: 'btn ghost small', 'data-p': p, onclick: () => { period = p; sync(); } }, label);
-    const controls = el('div', { class: 'inline', style: 'gap:6px;margin-bottom:14px' }, mkBtn('today', 'Today'), mkBtn('week', 'This week'), mkBtn('month', 'This month'));
+    const empSel = el('select', { style: 'width:auto;min-width:180px', onchange: () => { staffId = empSel.value; sync(); } },
+      el('option', { value: '' }, 'All employees'),
+      ...staff.slice().sort((a, b) => String(a.name || '').localeCompare(b.name || '')).map((u) => el('option', { value: u.id }, u.name)));
+    const controls = el('div', { class: 'inline', style: 'gap:6px;margin-bottom:14px;flex-wrap:wrap' },
+      mkBtn('today', 'Today'), mkBtn('week', 'This week'), mkBtn('month', 'This month'),
+      el('label', { style: 'margin:0;font-weight:400' }, empSel));
 
     function metricsFor(u) {
       const from = monitorWindowStart(period), today = localYmd();
@@ -1442,8 +1448,10 @@ async function renderMonitoring() {
     function sync() {
       controls.querySelectorAll('.btn').forEach((b) => b.classList.toggle('primary', b.dataset.p === period));
       results.innerHTML = '';
+      const shown = staffId ? staff.filter((u) => u.id === staffId) : staff;
+      if (!shown.length) { results.append(el('div', { class: 'empty' }, 'No matching employee.')); return; }
       const tbody = el('tbody');
-      staff.forEach((u) => {
+      shown.forEach((u) => {
         const m = metricsFor(u);
         const code = codes[u.id];
         const lastObs = ((code && code.observations) || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))[0];
