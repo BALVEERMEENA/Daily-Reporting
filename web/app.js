@@ -2278,4 +2278,7 @@ async function reopenTask(t) {
 }
 
 /* ------------------------------------------------------------------ */
+// Signal that the module fully loaded (Firebase SDK imported OK) so the
+// index.html fallback knows not to show the "couldn't load" message.
+if (typeof window !== 'undefined') window.__APP_BOOTED = true;
 boot();

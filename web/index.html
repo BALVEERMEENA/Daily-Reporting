@@ -19,8 +19,33 @@
   <meta name="apple-mobile-web-app-title" content="Daily Reporting" />
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <!-- Shown until the app boots; replaced by the app, or by the error below
+         if the app scripts can't load (e.g. a network/CDN block). -->
+    <div id="boot-status" style="min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#334155;padding:24px;text-align:center">
+      <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#ffb24d,#ef6c00);display:flex;align-items:center;justify-content:center;font-size:26px;color:#fff">☀</div>
+      <div id="boot-msg">Loading Daily Reporting…</div>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
+  <script>
+    // If the app hasn't started shortly after load, the scripts likely could
+    // not be fetched — show a clear message instead of a blank page.
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        if (window.__APP_BOOTED) return;
+        var s = document.getElementById('boot-status');
+        var m = document.getElementById('boot-msg');
+        if (!s || !m) return;
+        m.innerHTML = 'Couldn’t load the app.<br><span style="color:#6b7280;font-size:14px;display:inline-block;margin-top:8px">Please check your internet connection and try again.<br>If you are on an office / bank network, it may be blocking required resources.</span>';
+        var btn = document.createElement('button');
+        btn.textContent = '↻ Reload';
+        btn.style.cssText = 'padding:10px 18px;border:none;border-radius:8px;background:#ef6c00;color:#fff;font-weight:600;cursor:pointer';
+        btn.onclick = function () { location.reload(); };
+        s.appendChild(btn);
+      }, 9000);
+    });
+  </script>
   <script type="module" src="app.js"></script>
   <script>
     // Always load the freshest deploy: never cache the SW script, check for a
