@@ -564,26 +564,55 @@ const PAGES = {
   employee: ['tasks', 'reports', 'schedule'],
 };
 const LABELS = { dashboard: 'Dashboard', departments: 'Departments', users: 'Users', team: 'My Team', questionnaires: 'Questionnaires', reports: 'Reports', monitoring: 'Monitoring', tasks: 'Tasks', pendency: 'Pendency', approvals: 'Approvals', schedule: 'My Schedule' };
+const ICONS = { dashboard: '📊', departments: '🏢', users: '👥', team: '👥', questionnaires: '📝', reports: '📈', monitoring: '🔍', tasks: '✅', pendency: '📌', approvals: '🗂️', schedule: '📅' };
+function pageLabel(p) {
+  if (state.user.role === 'employee' && p === 'reports') return 'My Reports';
+  if (state.user.role === 'employee' && p === 'tasks') return 'My Tasks';
+  return LABELS[p];
+}
+function openDrawer() { const d = $('#drawer'), b = $('#drawer-backdrop'); if (d) d.classList.add('open'); if (b) b.classList.remove('hidden'); }
+function closeDrawer() { const d = $('#drawer'), b = $('#drawer-backdrop'); if (d) d.classList.remove('open'); if (b) b.classList.add('hidden'); }
 
 function enterApp() {
   root().innerHTML = '';
-  const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
-  const bell = el('button', { class: 'bell', title: 'Notifications', onclick: toggleNotifications }, '🔔', bellCount);
-  const nav = el('nav', { id: 'nav' });
-  const shell = el('div', {},
-    el('header', { class: 'topbar' },
-      el('div', { class: 'brand' }, 'Daily Reporting'), nav,
-      el('div', { class: 'topbar-right' }, bell,
-        el('button', { class: 'btn ghost small', title: 'Refresh', onclick: () => location.reload() }, '↻'),
-        el('span', { class: 'user-label' }, `${state.user.name} · ${state.user.role.replace('_', ' ')}`),
-        el('button', { class: 'btn ghost small', onclick: () => signOut(auth) }, 'Logout'))),
-    el('div', { id: 'notif-panel', class: 'notif-panel hidden' }), el('main', { id: 'page', class: 'page' }));
-  root().append(shell);
-
   const pages = PAGES[state.user.role] || ['reports'];
-  pages.forEach((p) => nav.append(el('button', { class: 'nav-item', 'data-page': p, onclick: () => navigate(p) },
-    state.user.role === 'employee' && p === 'reports' ? 'My Reports'
-      : state.user.role === 'employee' && p === 'tasks' ? 'My Tasks' : LABELS[p])));
+
+  // ----- Left navigation drawer -----
+  const nav = el('nav', { id: 'nav' });
+  pages.forEach((p) => nav.append(el('button', { class: 'nav-item', 'data-page': p, onclick: () => { navigate(p); closeDrawer(); } },
+    el('span', { class: 'nav-ic' }, ICONS[p] || '•'), el('span', {}, pageLabel(p)))));
+  const drawer = el('aside', { id: 'drawer', class: 'drawer' },
+    el('div', { class: 'drawer-head' },
+      el('div', { class: 'brand-badge' }, '☀'),
+      el('div', {}, el('div', { class: 'brand' }, 'Daily Reporting'), el('div', { class: 'brand-sub' }, 'Reporting Suite')),
+      el('button', { class: 'icon-btn drawer-x', title: 'Close', onclick: closeDrawer }, '✕')),
+    nav,
+    el('div', { class: 'drawer-foot' },
+      el('div', { class: 'avatar' }, (state.user.name || '?').slice(0, 1).toUpperCase()),
+      el('div', { style: 'flex:1;min-width:0' },
+        el('div', { class: 'user-label', style: 'font-weight:600' }, state.user.name),
+        el('div', { class: 'role-tag' }, state.user.role.replace('_', ' '))),
+      el('button', { class: 'icon-btn', title: 'Logout', onclick: () => signOut(auth) }, '⎋')));
+
+  // ----- Top bar + content -----
+  const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
+  const bell = el('button', { class: 'icon-btn bell', title: 'Notifications', onclick: toggleNotifications }, '🔔', bellCount);
+  const title = el('div', { id: 'topbar-title', class: 'topbar-title' }, 'Daily Reporting');
+  const content = el('div', { class: 'content' },
+    el('header', { class: 'topbar' },
+      el('button', { class: 'icon-btn hamburger', title: 'Menu', onclick: openDrawer }, '☰'),
+      title,
+      el('div', { style: 'flex:1' }),
+      el('button', { class: 'icon-btn', title: 'Refresh', onclick: () => location.reload() }, '↻'),
+      bell),
+    el('div', { id: 'notif-panel', class: 'notif-panel hidden' }),
+    el('main', { id: 'page', class: 'page' }));
+
+  root().append(el('div', { class: 'app-layout' },
+    drawer,
+    el('div', { id: 'drawer-backdrop', class: 'drawer-backdrop hidden', onclick: closeDrawer }),
+    content));
+
   navigate(pages[0]);
   refreshNotifications();
   if (!state._notifTimer) state._notifTimer = setInterval(refreshNotifications, 30000);
@@ -598,6 +627,7 @@ const ROUTES = {
 function navigate(page) {
   state.page = page;
   document.querySelectorAll('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
+  const t = $('#topbar-title'); if (t) t.textContent = pageLabel(page) || 'Daily Reporting';
   $('#notif-panel') && $('#notif-panel').classList.add('hidden');
   (ROUTES[page] || renderReports)();
 }
