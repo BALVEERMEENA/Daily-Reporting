@@ -27,6 +27,8 @@ import { firebaseConfig } from './firebase-config.js';
  * ------------------------------------------------------------------ */
 // Stable direct download for the latest Android app (published by CI).
 const APK_URL = 'https://github.com/BALVEERMEENA/Daily-Reporting/releases/download/android-latest/daily-reporting.apk';
+// Build a WhatsApp click-to-chat link (digits only; expects country code).
+const waLink = (mobile, text) => { const n = String(mobile || '').replace(/[^0-9]/g, ''); return n ? `https://wa.me/${n}?text=${encodeURIComponent(text || '')}` : null; };
 const CONFIG_READY = !String(firebaseConfig.apiKey || '').startsWith('REPLACE');
 const app = CONFIG_READY ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
@@ -704,16 +706,44 @@ function infoModal(title, contentNode) {
 /* ---- Dashboard ---- */
 async function renderDashboard() {
   await withPage(async () => {
-    const [reports, tasks] = await Promise.all([listReports(), listTasks()]);
-    const openTasks = tasks.filter((t) => t.status !== 'closed').length;
-    const pendingTotal = tasks.filter((t) => t.type === 'pendency' && t.status !== 'closed').reduce((s, t) => s + (t.pendency || 0), 0);
-    return [pageHead(`Welcome, ${state.user.name}`),
-      el('div', { class: 'grid' },
-        tile('Reports', reports.length, 'in view'),
-        tile('Open tasks', openTasks, `of ${tasks.length} total`),
-        tile('Pending total', pendingTotal, 'across your scope'),
-        tile('Unread alerts', state.notifications.filter((n) => !n.isRead).length, 'notifications')),
-      el('h3', { style: 'margin-top:28px' }, 'Recent reports'), reportsTable(reports.slice(0, 8))];
+    const [reports, assignments, users] = await Promise.all([
+      listReports(), listAssignments().catch(() => []), listUsers().catch(() => []),
+    ]);
+    const today = localYmd();
+    const byId = Object.fromEntries(users.map((u) => [u.id, u]));
+
+    // Who is expected to report (assigned a questionnaire) and hasn't today.
+    const expected = [...new Set(assignments.map((a) => a.userId).filter(Boolean))];
+    const reportedToday = new Set(reports.filter((r) => (r.reportDate || submittedYmd(r)) === today).map((r) => r.userId));
+    const pending = expected.filter((id) => !reportedToday.has(id))
+      .map((id) => byId[id] || { id, name: (assignments.find((a) => a.userId === id) || {}).userName || id })
+      .sort((a, b) => String(a.name || '').localeCompare(b.name || ''));
+    const doneCount = expected.length - pending.length;
+
+    const head = pageHead(`Welcome, ${state.user.name}`);
+    const summary = el('div', { class: 'tile', style: 'margin-bottom:14px' },
+      el('div', { style: 'font-size:15px' }, 'Reported today: ', el('strong', {}, `${doneCount} / ${expected.length}`),
+        expected.length ? el('span', { class: 'muted' }, `  ·  ${pending.length} pending`) : el('span', { class: 'muted' }, '  ·  no one is assigned a report yet')));
+
+    if (!pending.length) {
+      return [head, summary, el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today.' : 'Assign a questionnaire to start tracking daily reporting.')];
+    }
+
+    const reminderText = (name) => `Hello ${name || ''}, please submit your daily report for ${today}. Thank you.`;
+    const tbody = el('tbody');
+    pending.forEach((u) => {
+      const wa = waLink(u.mobile, reminderText(u.name));
+      tbody.append(el('tr', {},
+        el('td', {}, el('strong', {}, u.name || '—')),
+        el('td', {}, u.mobile ? el('span', { class: 'muted' }, u.mobile) : el('span', { class: 'muted' }, 'no number')),
+        el('td', {}, wa
+          ? el('a', { class: 'btn small', style: 'background:#dcfce7;color:#15803d', href: wa, target: '_blank', rel: 'noopener' }, '🟢 WhatsApp reminder')
+          : el('span', { class: 'muted', style: 'font-size:13px' }, 'Add a mobile number in Users'))));
+    });
+    return [head, summary,
+      el('h3', { style: 'margin:4px 0 8px' }, `Today’s reporting pending (${pending.length})`),
+      el('p', { class: 'muted', style: 'font-size:13px;margin:0 0 10px' }, 'Employees assigned a report who haven’t submitted for today. Tap WhatsApp to send a reminder.'),
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Remind'))), tbody)];
   });
 }
 function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
@@ -827,6 +857,9 @@ async function renderUsers(teamOnly) {
       el('td', {}, u.name),
       el('td', {}, el('span', { class: 'code-chip' }, u.uniqueId || '—'),
         u.uniqueId ? el('button', { class: 'btn ghost small', style: 'margin-left:6px', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(u.uniqueId); toast('Copied ' + u.uniqueId); } }, 'Copy') : null),
+      el('td', {}, u.mobile
+        ? el('a', { href: waLink(u.mobile, `Hello ${u.name || ''}`), target: '_blank', rel: 'noopener' }, u.mobile)
+        : el('span', { class: 'muted' }, '—')),
       el('td', {}, el('span', { class: 'pill ' + u.role }, u.role.replace('_', ' '))),
       el('td', {}, deptName(u.departmentId)),
       el('td', {}, u.authUid ? (u.email || 'yes') : '—'),
@@ -834,7 +867,7 @@ async function renderUsers(teamOnly) {
         el('button', { class: 'btn ghost small', onclick: () => userModal(u, departments) }, 'Edit'),
         u.id !== state.user.uid ? el('button', { class: 'btn danger small', onclick: () => delUser(u) }, 'Delete') : null)))));
     return [head, el('table', {}, el('thead', {}, el('tr', {},
-      el('th', {}, 'Name'), el('th', {}, 'Unique ID'), el('th', {}, 'Role'), el('th', {}, 'Department'), el('th', {}, 'Login'), el('th', {}, ''))), tbody)];
+      el('th', {}, 'Name'), el('th', {}, 'Unique ID'), el('th', {}, 'Mobile'), el('th', {}, 'Role'), el('th', {}, 'Department'), el('th', {}, 'Login'), el('th', {}, ''))), tbody)];
   });
 }
 
@@ -843,6 +876,7 @@ function userModal(user, departments) {
   const editing = !!user;
   const name = el('input', { value: user ? user.name : '', required: true });
   const uniqueId = el('input', { value: user ? user.uniqueId || '' : '', placeholder: 'e.g. EMP001', ...(editing ? { disabled: true } : { required: true }) });
+  const mobile = el('input', { type: 'tel', value: user ? user.mobile || '' : '', placeholder: 'with country code, e.g. 9198XXXXXXXX' });
   const role = el('select', {}, ...['employee', 'dept_head', 'admin'].map((r) => el('option', { value: r, selected: user && user.role === r }, r.replace('_', ' '))));
   const dept = el('select', {}, el('option', { value: '' }, '— none —'), ...departments.map((d) => el('option', { value: d.id, selected: user && user.departmentId === d.id }, d.name)));
   const email = el('input', { type: 'email', value: user ? user.email || '' : '', ...(editing ? { disabled: true } : {}) });
@@ -857,13 +891,14 @@ function userModal(user, departments) {
   const content = el('div', {},
     el('label', {}, 'Name', name),
     el('label', {}, 'Unique ID (used for reporting)', uniqueId),
+    el('label', {}, 'Mobile number (for WhatsApp reminders)', mobile),
     isAdmin ? el('label', {}, 'Role', role) : null,
     isAdmin ? el('label', {}, 'Department', dept) : null,
     loginSection);
 
   modal(editing ? 'Edit user' : 'Add user', content, async () => {
     if (editing) {
-      const patch = { name: name.value.trim() };
+      const patch = { name: name.value.trim(), mobile: mobile.value.trim() || null };
       if (isAdmin) { patch.role = role.value; patch.departmentId = dept.value || null; patch.deptPath = deptPathOf(dept.value || null, departments); }
       await updateDoc(doc(db, 'users', user.id), patch);
       // keep the reporting-code doc's name/department in sync
@@ -896,6 +931,7 @@ function userModal(user, departments) {
     const batch = writeBatch(db);
     batch.set(doc(db, 'users', docId), {
       name: name.value.trim(), uniqueId: uid, role: newRole, departmentId: newDept, deptPath: newDeptPath,
+      mobile: mobile.value.trim() || null,
       authUid, email: wantsLogin ? email.value.trim() : null, createdAt: serverTimestamp(),
     });
     batch.set(doc(db, 'codes', uid), {
