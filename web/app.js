@@ -25,6 +25,8 @@ import { firebaseConfig } from './firebase-config.js';
 /* ------------------------------------------------------------------ *
  * Firebase init
  * ------------------------------------------------------------------ */
+// Stable direct download for the latest Android app (published by CI).
+const APK_URL = 'https://github.com/BALVEERMEENA/Daily-Reporting/releases/download/android-latest/daily-reporting.apk';
 const CONFIG_READY = !String(firebaseConfig.apiKey || '').startsWith('REPLACE');
 const app = CONFIG_READY ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
@@ -229,6 +231,7 @@ function renderPublic() {
     el('h1', {}, 'Daily Reporting'),
     el('p', { class: 'muted' }, 'Enter your Unique ID to open your report.'),
     form, errBox, container,
+    el('a', { class: 'btn ghost', style: 'width:100%;justify-content:center;margin-top:16px', href: APK_URL, target: '_blank', rel: 'noopener', download: 'daily-reporting.apk' }, '📲 Download Android app (APK)'),
     el('p', { class: 'switch' },
       el('a', { href: '#', onclick: (e) => { e.preventDefault(); location.reload(); } }, '↻ Refresh'),
       el('span', {}, '   ·   '),
@@ -253,6 +256,7 @@ function renderLogin() {
   });
   root().append(centered(el('div', { class: 'card login-card' },
     el('h1', {}, 'Sign in'), form, errBox,
+    el('a', { class: 'btn ghost', style: 'width:100%;justify-content:center;margin-top:16px', href: APK_URL, target: '_blank', rel: 'noopener', download: 'daily-reporting.apk' }, '📲 Download Android app (APK)'),
     el('p', { class: 'switch' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderPublic(); } }, '← Report with your ID')))));
 }
 
