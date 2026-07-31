@@ -1703,54 +1703,6 @@ function businessMappingModal(fields, sources, onSaved) {
     toast('Mapping saved'); onSaved(clean);
   }, 'Save');
 }
-// The editable field list + mapping lives in settings/businessReport. Each
-// field is { label, source } where source is the questionnaire question/column
-// to sum (blank = match by the field label itself).
-async function loadBusinessConfig() {
-  try {
-    const s = await getDoc(doc(db, 'settings', 'businessReport'));
-    if (s.exists() && Array.isArray(s.data().fields) && s.data().fields.length) return s.data().fields;
-  } catch { /* ignore */ }
-  return BUSINESS_FIELDS.map((l) => ({ label: l, source: '' }));
-}
-async function saveBusinessConfig(fields) {
-  await setDoc(doc(db, 'settings', 'businessReport'), { fields, updatedAt: serverTimestamp(), updatedBy: state.user.uid });
-}
-// Every numeric question / table column across the questionnaires — offered as
-// mapping suggestions so the user maps to real questionnaire data.
-function questionnaireSourceLabels(questionnaires) {
-  const set = new Set();
-  questionnaires.forEach((qn) => (qn.questions || []).forEach((q) => {
-    if (q.type === 'number') set.add(q.text);
-    else if (q.type === 'table') (q.options || []).forEach((col) => { set.add(col); set.add(`${q.text} — ${col}`); });
-  }));
-  return [...set].filter(Boolean).sort();
-}
-function businessMappingModal(fields, sources, onSaved) {
-  let rows = fields.map((f) => ({ label: f.label, source: f.source || '' }));
-  const dl = el('datalist', { id: 'bizSrc' }, ...sources.map((s) => el('option', { value: s })));
-  const listWrap = el('div', {});
-  const rowNode = (f) => {
-    const name = el('input', { value: f.label || '', placeholder: 'Report field name', oninput: (e) => { f.label = e.target.value; } });
-    const src = el('input', { value: f.source || '', placeholder: 'Maps to question / column (blank = by name)', list: 'bizSrc', oninput: (e) => { f.source = e.target.value; } });
-    const del = el('button', { type: 'button', class: 'btn danger small', title: 'Remove', onclick: () => { rows = rows.filter((x) => x !== f); rebuild(); } }, '✕');
-    return el('div', { class: 'q-row' }, name, src, del);
-  };
-  function rebuild() { listWrap.innerHTML = ''; rows.forEach((f) => listWrap.append(rowNode(f))); }
-  rebuild();
-  const content = el('div', {}, dl,
-    el('p', { class: 'muted', style: 'font-size:13px' }, 'Left = the field shown in the report. Right = which questionnaire question or table column feeds it (leave blank to match by the field name). Add, remove or rename fields as needed.'),
-    listWrap,
-    el('div', { class: 'inline', style: 'margin-top:8px' },
-      el('button', { type: 'button', class: 'btn', onclick: () => { rows.push({ label: '', source: '' }); rebuild(); } }, '+ Add field'),
-      el('button', { type: 'button', class: 'btn ghost', onclick: () => { rows = BUSINESS_FIELDS.map((l) => ({ label: l, source: '' })); rebuild(); } }, 'Reset to form default')));
-  modal('Modify report fields & mapping', content, async () => {
-    const clean = rows.map((f) => ({ label: (f.label || '').trim(), source: (f.source || '').trim() })).filter((f) => f.label);
-    if (!clean.length) throw new Error('Add at least one field.');
-    await saveBusinessConfig(clean);
-    toast('Mapping saved'); onSaved(clean);
-  }, 'Save');
-}
 
 async function renderBusinessReport() {
   await withPage(async () => {
@@ -2326,4 +2278,7 @@ async function reopenTask(t) {
 }
 
 /* ------------------------------------------------------------------ */
+// Signal that the module fully loaded (Firebase SDK imported OK) so the
+// index.html fallback knows not to show the "couldn't load" message.
+if (typeof window !== 'undefined') window.__APP_BOOTED = true;
 boot();
