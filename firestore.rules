@@ -211,6 +211,12 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // ---- settings ----  (shared config, e.g. the Business Report mapping)
+    match /settings/{id} {
+      allow read: if isSignedIn();
+      allow write: if isManager();
+    }
+
     // ---- notifications ----
     match /notifications/{id} {
       allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
