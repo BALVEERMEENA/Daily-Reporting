@@ -1607,11 +1607,65 @@ function businessReportText(date, scope, nReports, nStaff, lines) {
   lines.forEach(([f, v]) => L.push(`${f}: ${fmtNum(v)}`));
   return L.join('\n');
 }
+// The editable field list + mapping lives in settings/businessReport. Each
+// field is { label, source } where source is the questionnaire question/column
+// to sum (blank = match by the field label itself).
+async function loadBusinessConfig() {
+  try {
+    const s = await getDoc(doc(db, 'settings', 'businessReport'));
+    if (s.exists() && Array.isArray(s.data().fields) && s.data().fields.length) return s.data().fields;
+  } catch { /* ignore */ }
+  return BUSINESS_FIELDS.map((l) => ({ label: l, source: '' }));
+}
+async function saveBusinessConfig(fields) {
+  await setDoc(doc(db, 'settings', 'businessReport'), { fields, updatedAt: serverTimestamp(), updatedBy: state.user.uid });
+}
+// Every numeric question / table column across the questionnaires — offered as
+// mapping suggestions so the user maps to real questionnaire data.
+function questionnaireSourceLabels(questionnaires) {
+  const set = new Set();
+  questionnaires.forEach((qn) => (qn.questions || []).forEach((q) => {
+    if (q.type === 'number') set.add(q.text);
+    else if (q.type === 'table') (q.options || []).forEach((col) => { set.add(col); set.add(`${q.text} — ${col}`); });
+  }));
+  return [...set].filter(Boolean).sort();
+}
+function businessMappingModal(fields, sources, onSaved) {
+  let rows = fields.map((f) => ({ label: f.label, source: f.source || '' }));
+  const dl = el('datalist', { id: 'bizSrc' }, ...sources.map((s) => el('option', { value: s })));
+  const listWrap = el('div', {});
+  const rowNode = (f) => {
+    const name = el('input', { value: f.label || '', placeholder: 'Report field name', oninput: (e) => { f.label = e.target.value; } });
+    const src = el('input', { value: f.source || '', placeholder: 'Maps to question / column (blank = by name)', list: 'bizSrc', oninput: (e) => { f.source = e.target.value; } });
+    const del = el('button', { type: 'button', class: 'btn danger small', title: 'Remove', onclick: () => { rows = rows.filter((x) => x !== f); rebuild(); } }, '✕');
+    return el('div', { class: 'q-row' }, name, src, del);
+  };
+  function rebuild() { listWrap.innerHTML = ''; rows.forEach((f) => listWrap.append(rowNode(f))); }
+  rebuild();
+  const content = el('div', {}, dl,
+    el('p', { class: 'muted', style: 'font-size:13px' }, 'Left = the field shown in the report. Right = which questionnaire question or table column feeds it (leave blank to match by the field name). Add, remove or rename fields as needed.'),
+    listWrap,
+    el('div', { class: 'inline', style: 'margin-top:8px' },
+      el('button', { type: 'button', class: 'btn', onclick: () => { rows.push({ label: '', source: '' }); rebuild(); } }, '+ Add field'),
+      el('button', { type: 'button', class: 'btn ghost', onclick: () => { rows = BUSINESS_FIELDS.map((l) => ({ label: l, source: '' })); rebuild(); } }, 'Reset to form default')));
+  modal('Modify report fields & mapping', content, async () => {
+    const clean = rows.map((f) => ({ label: (f.label || '').trim(), source: (f.source || '').trim() })).filter((f) => f.label);
+    if (!clean.length) throw new Error('Add at least one field.');
+    await saveBusinessConfig(clean);
+    toast('Mapping saved'); onSaved(clean);
+  }, 'Save');
+}
 
 async function renderBusinessReport() {
   await withPage(async () => {
-    const [reports, departments] = await Promise.all([listReports().catch(() => []), listDepartments().catch(() => [])]);
-    const head = pageHead('Business Report');
+    const [reports, departments, questionnaires, config] = await Promise.all([
+      listReports().catch(() => []), listDepartments().catch(() => []),
+      listQuestionnaires().catch(() => []), loadBusinessConfig(),
+    ]);
+    let fields = config;
+    const sources = questionnaireSourceLabels(questionnaires);
+    const canEdit = state.user.role === 'admin' || state.user.role === 'dept_head';
+    const head = pageHead('Business Report', canEdit ? [el('button', { class: 'btn', style: 'width:auto', onclick: () => businessMappingModal(fields, sources, (next) => { fields = next; build(); }) }, '✎ Modify')] : []);
     const dateI = el('input', { type: 'date', value: localYmd(), max: localYmd() });
     const deptSel = el('select', {}, el('option', { value: '' }, 'All branches (cumulative)'),
       ...departments.map((d) => el('option', { value: d.id }, d.name)));
@@ -1627,14 +1681,14 @@ async function renderBusinessReport() {
       const rows = reports.filter((r) => subYmd(r) === d && (!dep || (r.deptPath || []).includes(dep)));
       const totals = businessTotals(rows);
       const nStaff = new Set(rows.map((r) => r.userId)).size;
-      const lines = BUSINESS_FIELDS.map((f) => [f, totals[normLabel(f)] ?? 0]);
+      const lines = fields.map((f) => [f.label, totals[normLabel(f.source || f.label)] ?? 0]);
       const matched = lines.filter(([, v]) => v !== 0).length;
       const scopeName = dep ? ((departments.find((x) => x.id === dep) || {}).name || 'Branch') : 'All branches (cumulative)';
       const text = businessReportText(d, scopeName, rows.length, nStaff, lines);
 
       const emailUrl = `mailto:?subject=${encodeURIComponent('Branches daily business report — ' + d)}&body=${encodeURIComponent(text)}`;
       out.append(el('div', { class: 'tile', style: 'margin-bottom:12px' },
-        el('div', {}, el('strong', {}, `${rows.length} report(s)`), ` from ${nStaff} staff · ${matched}/${BUSINESS_FIELDS.length} fields with data`),
+        el('div', {}, el('strong', {}, `${rows.length} report(s)`), ` from ${nStaff} staff · ${matched}/${fields.length} fields with data`),
         el('div', { class: 'inline', style: 'margin-top:10px;gap:8px;flex-wrap:wrap' },
           el('a', { class: 'btn primary', style: 'width:auto', href: emailUrl }, '✉ Email'),
           el('button', { class: 'btn', style: 'width:auto', onclick: async () => { try { await navigator.clipboard.writeText(text); toast('Report copied'); } catch { toast('Copy failed', true); } } }, '⧉ Copy'),
