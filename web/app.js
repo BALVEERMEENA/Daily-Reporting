@@ -725,8 +725,15 @@ async function renderDashboard() {
       el('div', { style: 'font-size:15px' }, 'Reported today: ', el('strong', {}, `${doneCount} / ${expected.length}`),
         expected.length ? el('span', { class: 'muted' }, `  ·  ${pending.length} pending`) : el('span', { class: 'muted' }, '  ·  no one is assigned a report yet')));
 
+    const recent = [
+      el('h3', { style: 'margin:24px 0 8px' }, 'Recent reports'),
+      reportsTable(reports.slice(0, 8)),
+    ];
+
     if (!pending.length) {
-      return [head, summary, el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today.' : 'Assign a questionnaire to start tracking daily reporting.')];
+      return [head, summary,
+        el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today.' : 'Assign a questionnaire to start tracking daily reporting.'),
+        ...recent];
     }
 
     const reminderText = (name) => `Hello ${name || ''}, please submit your daily report for ${today}. Thank you.`;
@@ -743,7 +750,8 @@ async function renderDashboard() {
     return [head, summary,
       el('h3', { style: 'margin:4px 0 8px' }, `Today’s reporting pending (${pending.length})`),
       el('p', { class: 'muted', style: 'font-size:13px;margin:0 0 10px' }, 'Employees assigned a report who haven’t submitted for today. Tap WhatsApp to send a reminder.'),
-      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Remind'))), tbody)];
+      el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Remind'))), tbody),
+      ...recent];
   });
 }
 function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
