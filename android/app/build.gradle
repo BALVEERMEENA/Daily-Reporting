@@ -14,8 +14,25 @@ android {
         versionName '1.0'
     }
 
+    // Stable signing key so the app's SHA-256 never changes — this is what the
+    // site's /.well-known/assetlinks.json trusts, letting the TWA run
+    // full-screen (no URL bar). Non-sensitive: it only proves this app may open
+    // this site; the site's real security is Firebase Auth + rules.
+    signingConfigs {
+        twa {
+            storeFile file('twa-signing.keystore')
+            storePassword 'dailyreporting'
+            keyAlias 'dr'
+            keyPassword 'dailyreporting'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.twa
+        }
         release {
+            signingConfig signingConfigs.twa
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }

@@ -29,6 +29,11 @@ import { firebaseConfig } from './firebase-config.js';
 const APK_URL = 'https://github.com/BALVEERMEENA/Daily-Reporting/releases/download/android-latest/daily-reporting.apk';
 // Build a WhatsApp click-to-chat link (digits only; expects country code).
 const waLink = (mobile, text) => { const n = String(mobile || '').replace(/[^0-9]/g, ''); return n ? `https://wa.me/${n}?text=${encodeURIComponent(text || '')}` : null; };
+// True when running as the installed app (PWA / Android TWA), not a browser tab.
+const isStandalone = () => {
+  try { return window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || window.navigator.standalone === true; }
+  catch { return false; }
+};
 const CONFIG_READY = !String(firebaseConfig.apiKey || '').startsWith('REPLACE');
 const app = CONFIG_READY ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
@@ -604,7 +609,8 @@ function enterApp() {
           el('div', { class: 'user-label', style: 'font-weight:600' }, state.user.name),
           el('div', { class: 'role-tag' }, state.user.role.replace('_', ' ')))),
       el('button', { class: 'drawer-foot-btn', onclick: () => { closeDrawer(); renderPublic(); } }, '📲 Report with Unique ID'),
-      el('button', { class: 'drawer-foot-btn logout', onclick: () => signOut(auth) }, '⎋ Log out')));
+      el('button', { class: 'drawer-foot-btn logout', onclick: () => signOut(auth) }, '⎋ Log out'),
+      isStandalone() ? el('button', { class: 'drawer-foot-btn', onclick: () => { try { window.close(); } catch { /* ignore */ } setTimeout(() => toast('Use the phone Back gesture to exit if the app stays open.'), 300); } }, '✖ Close app') : null));
 
   // ----- Top bar + content -----
   const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
