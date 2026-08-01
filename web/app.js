@@ -1040,13 +1040,26 @@ async function listApprovals() {
 }
 async function renderApprovals() {
   await withPage(async () => {
-    const rows = await listApprovals();
+    const [rows, tasks] = await Promise.all([listApprovals(), listTasks().catch(() => [])]);
     const canApprove = (a) => a.status === 'pending' && (state.user.role === 'admin' || (a.departmentId !== state.user.departmentId && (a.deptPath || []).includes(state.user.departmentId)));
     const toApprove = rows.filter(canApprove);
     const mine = rows.filter((a) => a.requestedBy === state.user.uid);
+    const awaitingTasks = tasks.filter((t) => t.status === 'awaiting_approval');
     const head = pageHead('Approvals');
     const out = [head];
-    out.push(el('h3', {}, 'Pending your approval'));
+
+    // Task completions awaiting a manager's approval.
+    out.push(el('h3', {}, `Task completions awaiting approval (${awaitingTasks.length})`));
+    if (!awaitingTasks.length) out.push(el('p', { class: 'muted' }, 'No completed tasks waiting for approval.'));
+    else awaitingTasks.forEach((t) => out.push(el('div', { class: 'q-builder-item' },
+      el('div', {}, el('strong', {}, t.title),
+        el('div', { class: 'muted', style: 'font-size:12px' }, `completed by ${t.assignedToName || '—'}` + (t.lastRemark ? ` · ${t.lastRemark}` : ''))),
+      el('div', { class: 'inline', style: 'margin-top:8px' },
+        el('button', { class: 'btn primary', style: 'width:auto', onclick: () => approveTaskCompletion(t) }, '✓ Approve'),
+        el('button', { class: 'btn ghost', style: 'width:auto', onclick: () => reopenTask(t) }, 'Reopen'),
+        el('button', { class: 'btn ghost', style: 'width:auto', onclick: () => taskHistory(t) }, 'History')))));
+
+    out.push(el('h3', { style: 'margin-top:24px' }, 'Pending your approval'));
     if (!toApprove.length) out.push(el('p', { class: 'muted' }, 'Nothing waiting on you.'));
     else toApprove.forEach((a) => out.push(el('div', { class: 'q-builder-item' },
       el('div', {}, el('strong', {}, `${a.type} · ${a.questionnaireTitle}`),
@@ -2341,14 +2354,14 @@ async function approveTaskCompletion(t) {
   const batch = writeBatch(db);
   batch.delete(doc(db, 'tasks', t.id));
   if (t.assignedUniqueId) batch.update(doc(db, 'codes', t.assignedUniqueId), { tasks: arrayRemove(t.id) });
-  try { await batch.commit(); toast('Approved and removed'); renderTasks(); }
+  try { await batch.commit(); toast('Approved and removed'); navigate(state.page); }
   catch (e) { toast(friendlyError(e), true); }
 }
 // Reject a completion: send the task back to the employee as open.
 async function reopenTask(t) {
   const patch = { status: 'open', updatedAt: serverTimestamp() };
   if (t.type === 'onetime') { patch.oneTimeStatus = 'pending'; patch.completedDate = null; }
-  try { await updateDoc(doc(db, 'tasks', t.id), patch); toast('Sent back to the employee'); renderTasks(); }
+  try { await updateDoc(doc(db, 'tasks', t.id), patch); toast('Sent back to the employee'); navigate(state.page); }
   catch (e) { toast(friendlyError(e), true); }
 }
 
