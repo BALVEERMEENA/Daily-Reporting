@@ -56,31 +56,35 @@ root). Let Gradle sync finish.
 - **AAB (Google Play):** *Build → Generate Signed Bundle / APK → Android App
   Bundle*, create a keystore when prompted, and keep it safe.
 
-## Make it open with no address bar (Digital Asset Links)
+## Full‑screen (no address bar) — already configured
 
-A TWA only goes full‑screen if the website proves it trusts this app. Two files
-must match:
+The app now opens full‑screen with **no URL bar**. This works because both sides
+match:
 
-1. **App side** — already set in `app/src/main/res/values/strings.xml`
-   (`assetStatements`) and `AndroidManifest.xml`. Package id is
-   `app.web.dr2785.twa`.
-2. **Website side** — `web/.well-known/assetlinks.json` in this repo. Replace
-   `REPLACE_WITH_YOUR_APP_SIGNING_SHA256_FINGERPRINT` with your app's signing
-   certificate SHA‑256 fingerprint, then commit — GitHub Actions deploys it to
+1. **App side** — signed with a fixed key committed as
+   `app/twa-signing.keystore` (wired up in `app/build.gradle`), so the app's
+   SHA‑256 never changes. `strings.xml` (`assetStatements`) and the manifest
+   declare the trusted site.
+2. **Website side** — `web/.well-known/assetlinks.json` lists that key's SHA‑256
+   fingerprint and is deployed to
    `https://dr2785.web.app/.well-known/assetlinks.json`.
 
-Get the fingerprint:
+The signing key is **not sensitive**: it only proves this app may open this
+site full‑screen — the site's real security is Firebase Auth + rules. If you
+ever publish on **Google Play**, Play re‑signs the app, so add the Play
+**App‑signing SHA‑256** (Play Console → Release → Setup → App integrity) as an
+extra entry in `assetlinks.json`.
+
+To read the committed key's fingerprint yourself:
 
 ```bash
-# from your signing keystore
-keytool -list -v -keystore my-release-key.keystore -alias my-alias
+keytool -list -v -keystore app/twa-signing.keystore -alias dr -storepass dailyreporting
 ```
 
-or, if you publish on Google Play, copy the **SHA‑256** from
-*Play Console → Release → Setup → App integrity → App signing*.
+## Closing the app
 
-Until the fingerprint is filled in, the app still works but shows a thin URL bar
-at the top.
+The app has a **✖ Close app** button in the side menu (shown when running as the
+installed app). You can also close it with the phone's Back gesture.
 
 ## Change the app name / icon / URL
 
