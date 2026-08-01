@@ -766,7 +766,7 @@ async function renderDashboard() {
         el('td', {}, el('div', { class: 'row-actions' },
           wa ? el('a', { class: 'btn small', style: 'background:#dcfce7;color:#15803d', href: wa, target: '_blank', rel: 'noopener' }, '🟢 WhatsApp')
             : el('span', { class: 'muted', style: 'font-size:13px' }, 'no number'),
-          el('button', { class: 'btn ghost small', title: 'Exempt from reporting today (on leave etc.)', onclick: () => exemptToday(u, today) }, 'On leave')))));
+          el('button', { class: 'btn ghost small', title: 'Exempt from reporting today (on leave etc.) and optionally hand work to a cover', onclick: () => leaveModal(u, today, users) }, 'On leave')))));
     });
     return [head, summary,
       el('h3', { style: 'margin:4px 0 8px' }, `Today’s reporting pending (${pending.length})`),
@@ -788,6 +788,79 @@ async function exemptToday(u, date) {
 async function unexemptToday(userId, date) {
   try { await deleteDoc(doc(db, 'exemptions', `${date}__${userId}`)); toast('Exemption removed'); renderDashboard(); }
   catch (e) { toast(friendlyError(e), true); }
+}
+// Mark on leave, and optionally hand the person's reporting + tasks to a cover.
+function leaveModal(u, date, users) {
+  const covers = (users || []).filter((x) => x.id !== u.id && x.uniqueId).sort((a, b) => String(a.name || '').localeCompare(b.name || ''));
+  const delegate = el('input', { type: 'checkbox' });
+  const coverSel = el('select', {}, el('option', { value: '' }, '— choose covering employee —'), ...covers.map((x) => el('option', { value: x.id }, x.name)));
+  const repCb = el('input', { type: 'checkbox', checked: true });
+  const taskMode = el('select', {},
+    el('option', { value: 'copy' }, 'Copy — keep with both'),
+    el('option', { value: 'move' }, 'Move to cover'),
+    el('option', { value: 'none' }, 'Leave tasks unchanged'));
+  const box = el('div', { style: 'display:none;border-left:2px solid var(--line);padding-left:12px;margin-top:6px' },
+    el('label', {}, 'Covering employee', coverSel),
+    el('label', { style: 'font-weight:400' }, repCb, ' Give the cover their reports (questionnaires)'),
+    el('label', {}, 'Their open tasks', taskMode));
+  delegate.addEventListener('change', () => { box.style.display = delegate.checked ? '' : 'none'; });
+  const content = el('div', {},
+    el('p', { class: 'muted', style: 'font-size:13px' }, `Exempt ${u.name || 'this employee'} from reporting for ${date}. You can also hand their work to someone while they’re away.`),
+    el('label', { style: 'font-weight:400' }, delegate, ' Delegate their work to a cover'),
+    box);
+  modal('On leave · ' + (u.name || ''), content, async () => {
+    await setDoc(doc(db, 'exemptions', `${date}__${u.id}`), {
+      userId: u.id, userName: u.name || '', date, deptPath: u.deptPath || [],
+      by: state.user.uid, byName: state.user.name, createdAt: serverTimestamp(),
+    });
+    if (delegate.checked) {
+      const cover = users.find((x) => x.id === coverSel.value);
+      if (!cover) throw new Error('Choose a covering employee.');
+      await delegateWork(u, cover, { reporting: repCb.checked, taskMode: taskMode.value });
+    }
+    toast(`${u.name || 'Staff'} marked on leave`); renderDashboard();
+  }, 'Confirm');
+}
+// Hand `from`'s reporting (additive) and open tasks (move or copy) to `to`.
+async function delegateWork(from, to, { reporting, taskMode }) {
+  const batch = writeBatch(db);
+  const toDp = to.deptPath || [];
+  const toCode = to.uniqueId ? doc(db, 'codes', to.uniqueId) : null;
+  if (reporting && toCode) {
+    let fromQs = [], toHas = new Set();
+    if (from.uniqueId) { try { const s = await getDoc(doc(db, 'codes', from.uniqueId)); if (s.exists()) fromQs = s.data().questionnaires || []; } catch { /* ignore */ } }
+    try { const s = await getDoc(toCode); if (s.exists()) toHas = new Set((s.data().questionnaires || []).map((e) => e.questionnaireId)); } catch { /* ignore */ }
+    fromQs.forEach((e) => {
+      if (toHas.has(e.questionnaireId)) return;
+      const ref = doc(colRef('assignments'));
+      batch.set(ref, { questionnaireId: e.questionnaireId, userId: to.id, userName: to.name, departmentId: to.departmentId ?? null, deptPath: toDp, active: true, createdAt: serverTimestamp() });
+      batch.update(toCode, { questionnaires: arrayUnion({ assignmentId: ref.id, questionnaireId: e.questionnaireId, title: e.title || '' }) });
+    });
+  }
+  if (taskMode && taskMode !== 'none') {
+    const tasks = (await getWhere('tasks', 'assignedTo', from.id).catch(() => []))
+      .filter((t) => t.status !== 'closed' && t.status !== 'awaiting_approval');
+    tasks.forEach((t) => {
+      if (taskMode === 'move') {
+        batch.update(doc(db, 'tasks', t.id), { assignedTo: to.id, assignedToName: to.name, assignedUniqueId: to.uniqueId || null, departmentId: to.departmentId ?? null, deptPath: toDp, updatedAt: serverTimestamp() });
+        if (from.uniqueId) batch.update(doc(db, 'codes', from.uniqueId), { tasks: arrayRemove(t.id) });
+        if (toCode) batch.update(toCode, { tasks: arrayUnion(t.id) });
+      } else {
+        const ref = doc(colRef('tasks'));
+        batch.set(ref, {
+          title: t.title || '', description: t.description || '',
+          assignedTo: to.id, assignedToName: to.name, assignedUniqueId: to.uniqueId || null, assignedBy: state.user.uid,
+          departmentId: to.departmentId ?? null, deptPath: toDp, type: t.type, horizonDays: t.horizonDays ?? null, dueDate: t.dueDate ?? null, status: 'open',
+          oneTimeStatus: t.type === 'onetime' ? 'pending' : null, pendingReason: null, completedDate: null,
+          pendency: t.type === 'pendency' ? (t.pendency ?? 0) : null, initialPendency: t.type === 'pendency' ? (t.pendency ?? 0) : null,
+          tableColumns: t.tableColumns || [], tableTitle: t.tableTitle ?? null, tableMultiRow: !!t.tableMultiRow,
+          createdAt: serverTimestamp(),
+        });
+        if (toCode) batch.update(toCode, { tasks: arrayUnion(ref.id) });
+      }
+    });
+  }
+  await batch.commit();
 }
 function tile(t, big, sub) { return el('div', { class: 'tile' }, el('h3', {}, t), el('div', { class: 'big' }, String(big)), el('div', { class: 'muted' }, sub)); }
 
