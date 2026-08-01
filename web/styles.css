@@ -131,7 +131,15 @@ a:hover { text-decoration: underline; }
 .drawer .nav-item:hover { background: rgba(255,255,255,.10); color: #fff; }
 .drawer .nav-item.active { background: rgba(255,255,255,.16); color: #fff; border-left-color: var(--primary); }
 .nav-ic { font-size: 17px; width: 22px; text-align: center; }
-.drawer-foot { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-top: 1px solid rgba(255,255,255,.14); }
+.drawer-foot { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-top: 1px solid rgba(255,255,255,.14); }
+.drawer-user { display: flex; align-items: center; gap: 10px; }
+.drawer-foot-btn {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600;
+  color: #fff; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22);
+}
+.drawer-foot-btn:hover { background: rgba(255,255,255,.20); }
+.drawer-foot-btn.logout { background: rgba(0,0,0,.18); }
 .avatar {
   width: 36px; height: 36px; flex: 0 0 36px; border-radius: 50%;
   background: linear-gradient(135deg, #ffb24d, var(--primary));

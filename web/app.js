@@ -235,9 +235,11 @@ function renderPublic() {
     form, errBox, container,
     el('a', { class: 'btn ghost', style: 'width:100%;justify-content:center;margin-top:16px', href: APK_URL, target: '_blank', rel: 'noopener', download: 'daily-reporting.apk' }, '📲 Download Android app (APK)'),
     el('p', { class: 'switch' },
-      el('a', { href: '#', onclick: (e) => { e.preventDefault(); location.reload(); } }, '↻ Refresh'),
+      state.user
+        ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); enterApp(); } }, '← Back to app')
+        : el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →'),
       el('span', {}, '   ·   '),
-      el('a', { href: '#', onclick: (e) => { e.preventDefault(); renderLogin(); } }, 'Staff / admin login →')));
+      el('a', { href: '#', onclick: (e) => { e.preventDefault(); location.reload(); } }, '↻ Refresh')));
   root().append(centered(card));
 }
 
@@ -596,11 +598,13 @@ function enterApp() {
       el('button', { class: 'icon-btn drawer-x', title: 'Close', onclick: closeDrawer }, '✕')),
     nav,
     el('div', { class: 'drawer-foot' },
-      el('div', { class: 'avatar' }, (state.user.name || '?').slice(0, 1).toUpperCase()),
-      el('div', { style: 'flex:1;min-width:0' },
-        el('div', { class: 'user-label', style: 'font-weight:600' }, state.user.name),
-        el('div', { class: 'role-tag' }, state.user.role.replace('_', ' '))),
-      el('button', { class: 'icon-btn', title: 'Logout', onclick: () => signOut(auth) }, '⎋')));
+      el('div', { class: 'drawer-user' },
+        el('div', { class: 'avatar' }, (state.user.name || '?').slice(0, 1).toUpperCase()),
+        el('div', { style: 'flex:1;min-width:0' },
+          el('div', { class: 'user-label', style: 'font-weight:600' }, state.user.name),
+          el('div', { class: 'role-tag' }, state.user.role.replace('_', ' ')))),
+      el('button', { class: 'drawer-foot-btn', onclick: () => { closeDrawer(); renderPublic(); } }, '📲 Report with Unique ID'),
+      el('button', { class: 'drawer-foot-btn logout', onclick: () => signOut(auth) }, '⎋ Log out')));
 
   // ----- Top bar + content -----
   const bellCount = el('span', { id: 'bell-count', class: 'badge hidden' }, '0');
