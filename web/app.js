@@ -717,12 +717,32 @@ function infoModal(title, contentNode) {
 async function renderDashboard() {
   await withPage(async () => {
     const today = localYmd();
-    const [reports, assignments, users, exemptions] = await Promise.all([
+    const [reports, assignments, users, exemptions, holidays] = await Promise.all([
       listReports(), listAssignments().catch(() => []), listUsers().catch(() => []),
       getWhere('exemptions', 'date', today).catch(() => []),
+      getAll('holidays').catch(() => []),
     ]);
     const byId = Object.fromEntries(users.map((u) => [u.id, u]));
     const exemptSet = new Set(exemptions.map((e) => e.userId));
+    const holidayFor = (d) => holidays.find((h) => (h.id || h.date) === d);
+    const todayHoliday = holidayFor(today);
+
+    // Mark / remove a holiday for a chosen date — no reporting required then.
+    const hdate = el('input', { type: 'date', value: today, style: 'width:auto' });
+    const hbtn = el('button', { class: 'btn', style: 'width:auto' });
+    const syncHbtn = () => { hbtn.textContent = holidayFor(hdate.value) ? '✕ Remove holiday' : '＋ Mark holiday'; };
+    hdate.addEventListener('change', syncHbtn); syncHbtn();
+    hbtn.addEventListener('click', async () => {
+      const d = hdate.value; if (!d) return;
+      try {
+        if (holidayFor(d)) { await deleteDoc(doc(db, 'holidays', d)); toast('Holiday removed'); }
+        else { const name = (window.prompt('Holiday name (optional), e.g. Independence Day', '') || '').trim(); await setDoc(doc(db, 'holidays', d), { date: d, name, by: state.user.uid, byName: state.user.name, createdAt: serverTimestamp() }); toast('Marked as holiday'); }
+        renderDashboard();
+      } catch (e) { toast(friendlyError(e), true); }
+    });
+    const holidayControl = el('div', { class: 'tile', style: 'margin-bottom:14px' },
+      el('div', { class: 'inline' }, el('label', { style: 'margin:0' }, 'Holiday', hdate), hbtn),
+      holidays.length ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Marked: ' + holidays.map((h) => (h.id || h.date) + (h.name ? ` (${h.name})` : '')).sort().join(', ')) : null);
 
     // Expected = assigned a questionnaire AND marked mandatory (default yes).
     const expected = [...new Set(assignments.map((a) => a.userId).filter(Boolean))]
@@ -754,8 +774,17 @@ async function renderDashboard() {
       })),
     ] : [];
 
+    // On a holiday, no reporting is required — skip the pending list.
+    if (todayHoliday) {
+      return [head, holidayControl,
+        el('div', { class: 'tile', style: 'text-align:center;padding:24px;background:#ecfeff' },
+          el('div', { style: 'font-size:18px;font-weight:700' }, `🏖️ Holiday${todayHoliday.name ? ' · ' + todayHoliday.name : ''}`),
+          el('div', { class: 'muted' }, 'No reporting required today.')),
+        ...recent];
+    }
+
     if (!pending.length) {
-      return [head, summary,
+      return [head, holidayControl, summary,
         el('div', { class: 'empty' }, expected.length ? '🎉 Everyone has reported today (or is on leave).' : 'Assign a questionnaire to start tracking daily reporting.'),
         ...exemptedBlock, ...recent];
     }
@@ -772,7 +801,7 @@ async function renderDashboard() {
             : el('span', { class: 'muted', style: 'font-size:13px' }, 'no number'),
           el('button', { class: 'btn ghost small', title: 'Exempt from reporting today (on leave etc.) and optionally hand work to a cover', onclick: () => leaveModal(u, today, users) }, 'On leave')))));
     });
-    return [head, summary,
+    return [head, holidayControl, summary,
       el('h3', { style: 'margin:4px 0 8px' }, `Today’s reporting pending (${pending.length})`),
       el('p', { class: 'muted', style: 'font-size:13px;margin:0 0 10px' }, 'Employees assigned a report who haven’t submitted for today. Send a WhatsApp reminder, or mark “On leave” to exempt them for today.'),
       el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Employee'), el('th', {}, 'Mobile'), el('th', {}, 'Action'))), tbody),

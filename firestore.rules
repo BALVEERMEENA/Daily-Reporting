@@ -223,6 +223,12 @@ service cloud.firestore {
       allow create, update, delete: if isManager();
     }
 
+    // ---- holidays ----  (a date on which no reporting is required)
+    match /holidays/{id} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isManager();
+    }
+
     // ---- notifications ----
     match /notifications/{id} {
       allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
