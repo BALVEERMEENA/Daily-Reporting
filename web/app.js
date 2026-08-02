@@ -34,6 +34,16 @@ const isStandalone = () => {
   try { return window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || window.navigator.standalone === true; }
   catch { return false; }
 };
+// Automatic weekly holidays: every Sunday, plus the 2nd and 4th Saturday of the
+// month. Returns a label (e.g. "Sunday", "2nd Saturday") or null.
+function defaultHolidayName(ymd) {
+  const d = new Date(ymd + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  const day = d.getDay();
+  if (day === 0) return 'Sunday';
+  if (day === 6) { const nth = Math.ceil(d.getDate() / 7); if (nth === 2) return '2nd Saturday'; if (nth === 4) return '4th Saturday'; }
+  return null;
+}
 const CONFIG_READY = !String(firebaseConfig.apiKey || '').startsWith('REPLACE');
 const app = CONFIG_READY ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
@@ -725,12 +735,19 @@ async function renderDashboard() {
     const byId = Object.fromEntries(users.map((u) => [u.id, u]));
     const exemptSet = new Set(exemptions.map((e) => e.userId));
     const holidayFor = (d) => holidays.find((h) => (h.id || h.date) === d);
-    const todayHoliday = holidayFor(today);
+    const anyHoliday = (d) => { const h = holidayFor(d); if (h) return h; const n = defaultHolidayName(d); return n ? { id: d, date: d, name: n, _default: true } : null; };
+    const todayHoliday = anyHoliday(today);
 
-    // Mark / remove a holiday for a chosen date — no reporting required then.
+    // Mark / remove a holiday for a chosen date. Sundays and the 2nd & 4th
+    // Saturday are always holidays automatically (not removable here).
     const hdate = el('input', { type: 'date', value: today, style: 'width:auto' });
     const hbtn = el('button', { class: 'btn', style: 'width:auto' });
-    const syncHbtn = () => { hbtn.textContent = holidayFor(hdate.value) ? '✕ Remove holiday' : '＋ Mark holiday'; };
+    const syncHbtn = () => {
+      const d = hdate.value;
+      if (holidayFor(d)) { hbtn.textContent = '✕ Remove holiday'; hbtn.disabled = false; }
+      else if (defaultHolidayName(d)) { hbtn.textContent = 'Auto holiday · ' + defaultHolidayName(d); hbtn.disabled = true; }
+      else { hbtn.textContent = '＋ Mark holiday'; hbtn.disabled = false; }
+    };
     hdate.addEventListener('change', syncHbtn); syncHbtn();
     hbtn.addEventListener('click', async () => {
       const d = hdate.value; if (!d) return;
@@ -742,7 +759,8 @@ async function renderDashboard() {
     });
     const holidayControl = el('div', { class: 'tile', style: 'margin-bottom:14px' },
       el('div', { class: 'inline' }, el('label', { style: 'margin:0' }, 'Holiday', hdate), hbtn),
-      holidays.length ? el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Marked: ' + holidays.map((h) => (h.id || h.date) + (h.name ? ` (${h.name})` : '')).sort().join(', ')) : null);
+      el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Sundays and the 2nd & 4th Saturday are holidays automatically.'
+        + (holidays.length ? ' · Also marked: ' + holidays.map((h) => (h.id || h.date) + (h.name ? ` (${h.name})` : '')).sort().join(', ') : '')));
 
     // Expected = assigned a questionnaire AND marked mandatory (default yes).
     const expected = [...new Set(assignments.map((a) => a.userId).filter(Boolean))]
