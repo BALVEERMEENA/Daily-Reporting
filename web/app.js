@@ -1603,9 +1603,10 @@ async function renderReports() {
 function reportsTable(reports) {
   if (!reports.length) return el('div', { class: 'empty' }, 'No reports yet.');
   const tbody = el('tbody');
-  reports.forEach((r) => tbody.append(el('tr', {}, el('td', {}, fmtDate(r.submittedAt)), el('td', {}, r.userName),
+  reports.forEach((r) => tbody.append(el('tr', { style: 'cursor:pointer', onclick: () => viewReport(r) },
+    el('td', {}, fmtDate(r.submittedAt)), el('td', {}, r.userName),
     el('td', {}, r.questionnaireTitle), el('td', {}, String((r.answers || []).length)),
-    el('td', {}, el('button', { class: 'btn ghost small', onclick: () => viewReport(r) }, 'View')))));
+    el('td', {}, el('span', { class: 'muted', style: 'font-size:13px' }, 'View →')))));
   return el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Submitted'), el('th', {}, 'Employee'), el('th', {}, 'Questionnaire'), el('th', {}, 'Answers'), el('th', {}, ''))), tbody);
 }
 function viewReport(r) {
