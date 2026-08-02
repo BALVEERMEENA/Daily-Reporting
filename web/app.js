@@ -743,11 +743,15 @@ async function renderDashboard() {
       el('h3', { style: 'margin:24px 0 8px' }, 'Recent reports'),
       reportsTable(reports.slice(0, 8)),
     ];
+    const exemptById = Object.fromEntries(exemptions.map((e) => [e.userId, e]));
     const exemptedBlock = exempted.length ? [
       el('h3', { style: 'margin:22px 0 8px' }, `On leave / exempt today (${exempted.length})`),
-      el('div', { class: 'inline', style: 'gap:8px;flex-wrap:wrap' }, ...exempted.sort((a, b) => String(a.name).localeCompare(b.name)).map((u) =>
-        el('span', { class: 'pill', style: 'background:#e2e8f0;color:#334155' }, u.name || u.id, ' ',
-          el('a', { href: '#', style: 'color:#334155', title: 'Undo', onclick: (e) => { e.preventDefault(); unexemptToday(u.id, today); } }, '✕')))),
+      el('div', { class: 'inline', style: 'gap:8px;flex-wrap:wrap' }, ...exempted.sort((a, b) => String(a.name).localeCompare(b.name)).map((u) => {
+        const cov = (exemptById[u.id] || {}).delegation;
+        return el('span', { class: 'pill', style: 'background:#e2e8f0;color:#334155' }, u.name || u.id,
+          cov && cov.coverName ? el('span', { style: 'font-weight:400' }, ` · covered by ${cov.coverName}`) : '', ' ',
+          el('a', { href: '#', style: 'color:#334155', title: 'Undo leave' + (cov ? ' & cover' : ''), onclick: (e) => { e.preventDefault(); unexemptToday(u.id, today); } }, '✕'));
+      })),
     ] : [];
 
     if (!pending.length) {
@@ -786,8 +790,118 @@ async function exemptToday(u, date) {
   } catch (e) { toast(friendlyError(e), true); }
 }
 async function unexemptToday(userId, date) {
-  try { await deleteDoc(doc(db, 'exemptions', `${date}__${userId}`)); toast('Exemption removed'); renderDashboard(); }
-  catch (e) { toast(friendlyError(e), true); }
+  const ref = doc(db, 'exemptions', `${date}__${userId}`);
+  try {
+    const snap = await getDoc(ref);
+    const batch = writeBatch(db);
+    if (snap.exists() && snap.data().delegation) await reverseDelegation(snap.data().delegation, batch);
+    batch.delete(ref);
+    await batch.commit();
+    toast('Leave and any cover removed'); renderDashboard();
+  } catch (e) { toast(friendlyError(e), true); }
+}
+// Mark on leave, and optionally hand the person's reporting + tasks to a cover.
+function leaveModal(u, date, users) {
+  const covers = (users || []).filter((x) => x.id !== u.id && x.uniqueId).sort((a, b) => String(a.name || '').localeCompare(b.name || ''));
+  const delegate = el('input', { type: 'checkbox' });
+  const coverSel = el('select', {}, el('option', { value: '' }, '— choose covering employee —'), ...covers.map((x) => el('option', { value: x.id }, x.name)));
+  const repCb = el('input', { type: 'checkbox', checked: true });
+  const taskMode = el('select', {},
+    el('option', { value: 'copy' }, 'Copy — keep with both'),
+    el('option', { value: 'move' }, 'Move to cover'),
+    el('option', { value: 'none' }, 'Leave tasks unchanged'));
+  const box = el('div', { style: 'display:none;border-left:2px solid var(--line);padding-left:12px;margin-top:6px' },
+    el('label', {}, 'Covering employee', coverSel),
+    el('label', { style: 'font-weight:400' }, repCb, ' Give the cover their reports (questionnaires)'),
+    el('label', {}, 'Their open tasks', taskMode));
+  delegate.addEventListener('change', () => { box.style.display = delegate.checked ? '' : 'none'; });
+  const content = el('div', {},
+    el('p', { class: 'muted', style: 'font-size:13px' }, `Exempt ${u.name || 'this employee'} from reporting for ${date} only. You can hand their work to a cover for the day — it is given back automatically when you undo the leave (when they return).`),
+    el('label', { style: 'font-weight:400' }, delegate, ' Delegate their work to a cover (for this day)'),
+    box);
+  modal('On leave · ' + (u.name || ''), content, async () => {
+    let delegation = null;
+    if (delegate.checked) {
+      const cover = users.find((x) => x.id === coverSel.value);
+      if (!cover) throw new Error('Choose a covering employee.');
+      delegation = await delegateWork(u, cover, { reporting: repCb.checked, taskMode: taskMode.value });
+    }
+    await setDoc(doc(db, 'exemptions', `${date}__${u.id}`), {
+      userId: u.id, userName: u.name || '', date, deptPath: u.deptPath || [],
+      by: state.user.uid, byName: state.user.name, createdAt: serverTimestamp(),
+      ...(delegation ? { delegation } : {}),
+    });
+    toast(`${u.name || 'Staff'} marked on leave`); renderDashboard();
+  }, 'Confirm');
+}
+// Hand `from`'s reporting (additive) and open tasks (move or copy) to `to`, and
+// return a record of exactly what changed so it can be reversed when the leave
+// ends (the delegation applies only for that day / until undone).
+async function delegateWork(from, to, { reporting, taskMode }) {
+  const batch = writeBatch(db);
+  const toDp = to.deptPath || [];
+  const toCode = to.uniqueId ? doc(db, 'codes', to.uniqueId) : null;
+  const rec = {
+    coverId: to.id, coverName: to.name || '', coverUniqueId: to.uniqueId || null,
+    fromId: from.id, fromName: from.name || '', fromUniqueId: from.uniqueId || null, fromDeptPath: from.deptPath || [],
+    assignmentIds: [], copiedTaskIds: [], movedTaskIds: [],
+  };
+  if (reporting && toCode) {
+    let fromQs = [], toHas = new Set();
+    if (from.uniqueId) { try { const s = await getDoc(doc(db, 'codes', from.uniqueId)); if (s.exists()) fromQs = s.data().questionnaires || []; } catch { /* ignore */ } }
+    try { const s = await getDoc(toCode); if (s.exists()) toHas = new Set((s.data().questionnaires || []).map((e) => e.questionnaireId)); } catch { /* ignore */ }
+    fromQs.forEach((e) => {
+      if (toHas.has(e.questionnaireId)) return;
+      const ref = doc(colRef('assignments'));
+      batch.set(ref, { questionnaireId: e.questionnaireId, userId: to.id, userName: to.name, departmentId: to.departmentId ?? null, deptPath: toDp, active: true, delegated: true, createdAt: serverTimestamp() });
+      batch.update(toCode, { questionnaires: arrayUnion({ assignmentId: ref.id, questionnaireId: e.questionnaireId, title: e.title || '' }) });
+      rec.assignmentIds.push(ref.id);
+    });
+  }
+  if (taskMode && taskMode !== 'none') {
+    const tasks = (await getWhere('tasks', 'assignedTo', from.id).catch(() => []))
+      .filter((t) => t.status !== 'closed' && t.status !== 'awaiting_approval');
+    tasks.forEach((t) => {
+      if (taskMode === 'move') {
+        batch.update(doc(db, 'tasks', t.id), { assignedTo: to.id, assignedToName: to.name, assignedUniqueId: to.uniqueId || null, departmentId: to.departmentId ?? null, deptPath: toDp, updatedAt: serverTimestamp() });
+        if (from.uniqueId) batch.update(doc(db, 'codes', from.uniqueId), { tasks: arrayRemove(t.id) });
+        if (toCode) batch.update(toCode, { tasks: arrayUnion(t.id) });
+        rec.movedTaskIds.push(t.id);
+      } else {
+        const ref = doc(colRef('tasks'));
+        batch.set(ref, {
+          title: t.title || '', description: t.description || '',
+          assignedTo: to.id, assignedToName: to.name, assignedUniqueId: to.uniqueId || null, assignedBy: state.user.uid,
+          departmentId: to.departmentId ?? null, deptPath: toDp, type: t.type, horizonDays: t.horizonDays ?? null, dueDate: t.dueDate ?? null, status: 'open',
+          oneTimeStatus: t.type === 'onetime' ? 'pending' : null, pendingReason: null, completedDate: null,
+          pendency: t.type === 'pendency' ? (t.pendency ?? 0) : null, initialPendency: t.type === 'pendency' ? (t.pendency ?? 0) : null,
+          tableColumns: t.tableColumns || [], tableTitle: t.tableTitle ?? null, tableMultiRow: !!t.tableMultiRow,
+          delegated: true, createdAt: serverTimestamp(),
+        });
+        if (toCode) batch.update(toCode, { tasks: arrayUnion(ref.id) });
+        rec.copiedTaskIds.push(ref.id);
+      }
+    });
+  }
+  await batch.commit();
+  return rec;
+}
+// Undo the delegation recorded on an exemption (remove given reports, delete
+// copied tasks, move moved tasks back to the original owner).
+async function reverseDelegation(g, batch) {
+  if (!g) return;
+  const coverCode = g.coverUniqueId ? doc(db, 'codes', g.coverUniqueId) : null;
+  (g.assignmentIds || []).forEach((id) => batch.delete(doc(db, 'assignments', id)));
+  if (coverCode && (g.assignmentIds || []).length) {
+    try { const cs = await getDoc(coverCode); if (cs.exists()) batch.update(coverCode, { questionnaires: (cs.data().questionnaires || []).filter((e) => !g.assignmentIds.includes(e.assignmentId)) }); } catch { /* ignore */ }
+  }
+  (g.copiedTaskIds || []).forEach((id) => batch.delete(doc(db, 'tasks', id)));
+  if (coverCode && (g.copiedTaskIds || []).length) batch.update(coverCode, { tasks: arrayRemove(...g.copiedTaskIds) });
+  (g.movedTaskIds || []).forEach((id) => batch.update(doc(db, 'tasks', id), { assignedTo: g.fromId, assignedToName: g.fromName, assignedUniqueId: g.fromUniqueId || null, deptPath: g.fromDeptPath || [], updatedAt: serverTimestamp() }));
+  if ((g.movedTaskIds || []).length) {
+    if (coverCode) batch.update(coverCode, { tasks: arrayRemove(...g.movedTaskIds) });
+    if (g.fromUniqueId) batch.update(doc(db, 'codes', g.fromUniqueId), { tasks: arrayUnion(...g.movedTaskIds) });
+  }
 }
 // Mark on leave, and optionally hand the person's reporting + tasks to a cover.
 function leaveModal(u, date, users) {
