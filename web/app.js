@@ -364,19 +364,49 @@ async function renderReporterTasks(uniqueId, codeData, wrap) {
   }
   if (!tasks.length) return 0;
   wrap.append(el('hr'), el('h3', {}, 'Your tasks'));
+  wrap.append(el('p', { class: 'muted', style: 'font-size:13px;margin-top:-4px' },
+    'For each task, choose whether you have an update today. If not, just go ahead — the task stays pending and its age keeps counting.'));
   tasks.forEach((task) => {
     const card = el('div', { class: 'q-builder-item' });
     const rebuild = () => {
       card.innerHTML = '';
+      const a = taskAging(task);
+      const active = task.status !== 'closed' && task.status !== 'awaiting_approval';
+      // Age line, and a red "delayed — take action" banner past the threshold.
+      const ageLine = active ? agingText(task) : '';
+      const delayBanner = (active && a.delayed)
+        ? el('div', { style: 'background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px' },
+            el('strong', {}, `⚠ Delayed by ${a.gauge} days. `),
+            'Please take necessary action to complete this task, or add an update explaining the hold-up.')
+        : null;
       card.append(
         el('strong', {}, task.title),
         task.description ? el('div', { class: 'muted' }, task.description) : null,
-        el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, taskMeta(task)),
-        task.status === 'closed'
+        el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:4px' }, taskMeta(task)),
+        ageLine ? el('div', { style: 'font-size:12px;margin-bottom:6px;color:' + (a.overdue ? '#b45309' : '#64748b') }, '⏳ ' + ageLine) : null,
+        delayBanner);
+      if (!active) {
+        card.append(task.status === 'closed'
           ? el('span', { class: 'pill done' }, 'closed')
-          : task.status === 'awaiting_approval'
-            ? el('span', { class: 'pill pending' }, '✓ Completed — awaiting approval')
-            : taskUpdateControls(task, { uniqueId }, rebuild));
+          : el('span', { class: 'pill pending' }, '✓ Completed — awaiting approval'));
+        return;
+      }
+      // "Any update today?" — reveal the form only when the person has one.
+      const formMount = el('div', {});
+      const choiceRow = el('div', { class: 'inline', style: 'margin-top:4px' });
+      const yesBtn = el('button', { class: 'btn primary small', onclick: () => {
+        choiceRow.style.display = 'none';
+        formMount.append(taskUpdateControls(task, { uniqueId }, rebuild));
+      } }, '✏ I have an update');
+      const noBtn = el('button', { class: 'btn ghost small', onclick: () => {
+        choiceRow.style.display = 'none';
+        formMount.innerHTML = '';
+        formMount.append(el('div', { class: 'muted', style: 'font-size:13px' },
+          'No update today — task left pending. ',
+          el('button', { class: 'btn ghost small', style: 'margin-left:6px', onclick: rebuild }, 'Change')));
+      } }, '✓ No update today');
+      choiceRow.append(yesBtn, noBtn);
+      card.append(choiceRow, formMount);
     };
     rebuild();
     wrap.append(card);
@@ -1386,7 +1416,10 @@ async function manageAssignments(q) {
   }
   async function reload() { current = await getWhere('assignments', 'questionnaireId', q.id); refreshSelect(); renderList(); }
   async function doAssign() {
-    if (!userSelect.value) return;
+    if (!userSelect.value) {
+      toast(userSelect.options.length <= 1 ? 'Everyone is already assigned' : 'Choose a person first', true);
+      return;
+    }
     const u = userById[userSelect.value];
     if (!u.uniqueId) { toast('That user has no Unique ID', true); return; }
     try {
@@ -2243,10 +2276,43 @@ async function renderPendency() {
 /* ---- Tasks ---- */
 function addDays(n) { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
 
+// A task counts as "delayed" (needs attention) once it has been open — or
+// overdue past its due date — for this many days.
+const TASK_DELAY_DAYS = 15;
+function daysSinceYmd(ymd) {
+  if (!ymd) return null;
+  const then = new Date(ymd + 'T00:00:00').getTime();
+  const now = new Date(localYmd() + 'T00:00:00').getTime();
+  if (isNaN(then)) return null;
+  return Math.round((now - then) / 86400000);
+}
+/** Aging info for a task: how long it has been pending, whether it is overdue,
+ *  and whether it has crossed the delay threshold and needs action. */
+function taskAging(t) {
+  const createdMs = millis(t.createdAt);
+  const pendingDays = createdMs ? Math.max(0, Math.floor((Date.now() - createdMs) / 86400000)) : null;
+  const overdueDays = t.dueDate ? daysSinceYmd(t.dueDate) : null;
+  const overdue = overdueDays != null && overdueDays > 0;
+  // Gauge delay against the due date if there is one, else against age.
+  const gauge = overdue ? overdueDays : pendingDays;
+  const delayed = gauge != null && gauge >= TASK_DELAY_DAYS;
+  return { pendingDays, overdueDays, overdue, delayed, gauge };
+}
+/** Short human phrase for a task's age, e.g. "pending since 6 days · overdue by 3 days". */
+function agingText(t) {
+  const a = taskAging(t);
+  const bits = [];
+  if (a.pendingDays != null) bits.push('pending since ' + a.pendingDays + (a.pendingDays === 1 ? ' day' : ' days'));
+  if (a.overdue) bits.push('overdue by ' + a.overdueDays + (a.overdueDays === 1 ? ' day' : ' days'));
+  return bits.join(' · ');
+}
+
 function taskMeta(t) {
   const parts = [t.type === 'pendency' ? 'quantity' : 'one-time'];
   if (t.dueDate) parts.push('due ' + t.dueDate);
   else if (t.horizonDays) parts.push(t.horizonDays + '-day');
+  const age = agingText(t);
+  if (age && t.status !== 'closed' && t.status !== 'awaiting_approval') parts.push(age);
   if (t.type === 'onetime' && t.oneTimeStatus === 'completed' && t.completedDate) parts.push('completed ' + t.completedDate);
   if (t.type === 'onetime' && t.oneTimeStatus !== 'completed' && t.pendingReason) parts.push('reason: ' + t.pendingReason);
   if (t.lastRemark) parts.push(`work ${t.lastRemarkDate ? '(' + t.lastRemarkDate + ')' : ''}: ${t.lastRemark}`);
@@ -2372,15 +2438,20 @@ async function renderTasks() {
     const head = pageHead(isEmployee ? 'My Tasks' : 'Tasks', actions);
     if (!tasks.length) return [head, el('div', { class: 'empty' }, 'No tasks.')];
     // Tasks awaiting a completion approval float to the top for managers.
-    const ordered = tasks.slice().sort((a, b) => (b.status === 'awaiting_approval') - (a.status === 'awaiting_approval'));
+    const rank = (t) => (t.status === 'awaiting_approval' ? 2 : 0) + (t.status !== 'closed' && taskAging(t).delayed ? 1 : 0);
+    const ordered = tasks.slice().sort((a, b) => rank(b) - rank(a));
     const tbody = el('tbody');
     ordered.forEach((t) => {
       const awaiting = t.status === 'awaiting_approval';
       const progress = t.type === 'pendency'
         ? el('span', {}, `pending ${t.pendency ?? 0}` + (t.initialPendency != null ? ` / start ${t.initialPendency}` : ''))
         : el('span', { class: 'pill ' + (t.oneTimeStatus === 'completed' ? 'done' : 'pending') }, t.oneTimeStatus || 'pending');
+      const aging = taskAging(t);
+      const delayedPill = (!awaiting && t.status !== 'closed' && aging.delayed)
+        ? el('span', { class: 'pill', style: 'background:#fef2f2;color:#b91c1c;margin-left:4px' }, `⚠ delayed ${aging.gauge}d` )
+        : null;
       const statusPill = awaiting ? el('span', { class: 'pill in_progress' }, 'awaiting approval')
-        : el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open');
+        : el('span', {}, el('span', { class: 'pill ' + (t.status === 'closed' ? 'done' : 'pending') }, t.status || 'open'), delayedPill);
       tbody.append(el('tr', {},
         el('td', {}, el('div', {}, el('strong', {}, t.title), t.description ? el('div', { class: 'muted' }, t.description) : null,
           el('div', { class: 'muted', style: 'font-size:12px' }, taskMeta(t)))),
