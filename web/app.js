@@ -95,7 +95,7 @@ const normId = (s) => String(s || '').trim().toUpperCase();
 /* ------------------------------------------------------------------ *
  * State
  * ------------------------------------------------------------------ */
-const state = { user: null, page: null, notifications: [] };
+const state = { user: null, page: null, notifications: [], taskDelayDays: 15 };
 
 /* ------------------------------------------------------------------ *
  * Firestore data layer
@@ -193,6 +193,7 @@ function boot() {
       const profile = await getDoc(doc(db, 'users', fbUser.uid));
       if (!profile.exists()) return renderNoProfile(fbUser);
       state.user = { uid: fbUser.uid, email: fbUser.email, ...profile.data() };
+      await loadTaskDelayDays();
       enterApp();
     } catch (err) {
       renderNoProfile(fbUser, friendlyError(err));
@@ -281,6 +282,7 @@ function renderLogin() {
 
 /** After a valid Unique ID, show the assigned questionnaire(s) and tasks. */
 async function openReporter(uniqueId, codeData, container) {
+  await loadTaskDelayDays();
   container.innerHTML = '';
   container.append(el('hr'), el('p', {}, el('strong', {}, `Hello, ${codeData.name || ''}`)));
   const oWrap = el('div', {});
@@ -2277,8 +2279,21 @@ async function renderPendency() {
 function addDays(n) { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
 
 // A task counts as "delayed" (needs attention) once it has been open — or
-// overdue past its due date — for this many days.
-const TASK_DELAY_DAYS = 15;
+// overdue past its due date — for the tolerance set by the head of department
+// or admin (settings/taskDelay). 15 days is only the fallback default.
+const DEFAULT_TASK_DELAY_DAYS = 15;
+function taskDelayDays() {
+  const n = state.taskDelayDays;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TASK_DELAY_DAYS;
+}
+async function loadTaskDelayDays() {
+  try {
+    const s = await getDoc(doc(db, 'settings', 'taskDelay'));
+    if (s.exists() && Number.isFinite(s.data().days) && s.data().days > 0) {
+      state.taskDelayDays = s.data().days;
+    }
+  } catch { /* ignore — keep default */ }
+}
 function daysSinceYmd(ymd) {
   if (!ymd) return null;
   const then = new Date(ymd + 'T00:00:00').getTime();
@@ -2295,7 +2310,7 @@ function taskAging(t) {
   const overdue = overdueDays != null && overdueDays > 0;
   // Gauge delay against the due date if there is one, else against age.
   const gauge = overdue ? overdueDays : pendingDays;
-  const delayed = gauge != null && gauge >= TASK_DELAY_DAYS;
+  const delayed = gauge != null && gauge >= taskDelayDays();
   return { pendingDays, overdueDays, overdue, delayed, gauge };
 }
 /** Short human phrase for a task's age, e.g. "pending since 6 days · overdue by 3 days". */
@@ -2434,7 +2449,10 @@ async function renderTasks() {
     const canAssign = state.user.role === 'admin' || state.user.role === 'dept_head';
     const [tasks, users] = await Promise.all([listTasks(), canAssign ? listUsers() : Promise.resolve([])]);
     const isEmployee = state.user.role === 'employee';
-    const actions = canAssign ? [el('button', { class: 'btn primary', style: 'width:auto', onclick: () => taskModal(users) }, '+ Assign task')] : [];
+    const actions = canAssign ? [
+      el('button', { class: 'btn ghost', style: 'width:auto', title: 'Days before a pending task is flagged as delayed', onclick: () => delayToleranceModal() },
+        `⏱ Delay tolerance: ${taskDelayDays()}d`),
+      el('button', { class: 'btn primary', style: 'width:auto', onclick: () => taskModal(users) }, '+ Assign task')] : [];
     const head = pageHead(isEmployee ? 'My Tasks' : 'Tasks', actions);
     if (!tasks.length) return [head, el('div', { class: 'empty' }, 'No tasks.')];
     // Tasks awaiting a completion approval float to the top for managers.
@@ -2498,6 +2516,23 @@ async function taskHistory(t) {
     body.append(el('div', { class: 'report-answer' }, el('div', { class: 'a' }, line)));
   });
   infoModal('History · ' + t.title, body);
+}
+
+// Head of department / admin sets how many days a task may stay pending before
+// it is flagged as delayed ("take necessary action"). Stored in settings/taskDelay.
+function delayToleranceModal() {
+  const days = el('input', { type: 'number', min: '1', step: '1', required: true, value: String(taskDelayDays()) });
+  modal('Delay tolerance', el('div', {},
+    el('p', { class: 'muted', style: 'font-size:13px' },
+      'A task is flagged "Delayed — take necessary action" once it has been pending (or overdue past its due date) for this many days. This applies to every task and is shown to staff while reporting.'),
+    el('label', {}, 'Flag as delayed after (days)', days)),
+    async () => {
+      const n = parseInt(days.value || '0', 10);
+      if (!(n > 0)) throw new Error('Enter a number of days greater than 0.');
+      await setDoc(doc(db, 'settings', 'taskDelay'), { days: n, updatedAt: serverTimestamp(), updatedBy: state.user.uid });
+      state.taskDelayDays = n;
+      toast(`Delay tolerance set to ${n} days`); renderTasks();
+    }, 'Save');
 }
 
 function taskModal(users) {

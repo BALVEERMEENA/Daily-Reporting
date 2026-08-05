@@ -211,9 +211,13 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // ---- settings ----  (shared config, e.g. the Business Report mapping)
+    // ---- settings ----  (shared config, e.g. the Business Report mapping and
+    // the task delay tolerance). Single-doc reads by id are public so the
+    // anonymous report-by-code flow can read the delay tolerance; listing stays
+    // signed-in. These docs hold non-sensitive configuration only.
     match /settings/{id} {
-      allow read: if isSignedIn();
+      allow get: if true;
+      allow list: if isSignedIn();
       allow write: if isManager();
     }
 
