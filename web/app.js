@@ -818,8 +818,12 @@ async function renderDashboard() {
       el('h3', { style: 'margin:22px 0 8px' }, `On leave / exempt today (${exempted.length})`),
       el('div', { class: 'inline', style: 'gap:8px;flex-wrap:wrap' }, ...exempted.sort((a, b) => String(a.name).localeCompare(b.name)).map((u) => {
         const cov = (exemptById[u.id] || {}).delegation;
+        const hasCoverReporting = cov && (cov.assignmentIds || []).length;
         return el('span', { class: 'pill', style: 'background:#e2e8f0;color:#334155' }, u.name || u.id,
           cov && cov.coverName ? el('span', { style: 'font-weight:400' }, ` · covered by ${cov.coverName}`) : '', ' ',
+          hasCoverReporting ? el('a', { href: '#', style: 'color:#b91c1c;font-weight:400;font-size:12px;margin-right:6px',
+            title: `Remove only the delegated report from ${cov.coverName || 'the cover'} (keeps the leave and any tasks)`,
+            onclick: (e) => { e.preventDefault(); removeCoverReporting(u.id, today); } }, 'remove reporting') : '',
           el('a', { href: '#', style: 'color:#334155', title: 'Undo leave' + (cov ? ' & cover' : ''), onclick: (e) => { e.preventDefault(); unexemptToday(u.id, today); } }, '✕'));
       })),
     ] : [];
@@ -877,6 +881,29 @@ async function unexemptToday(userId, date) {
     batch.delete(ref);
     await batch.commit();
     toast('Leave and any cover removed'); renderDashboard();
+  } catch (e) { toast(friendlyError(e), true); }
+}
+// Remove ONLY the delegated reporting from a cover, leaving the leave and any
+// delegated tasks in place. Deletes the cover's delegated assignments, strips
+// those questionnaires from their code, and clears the reporting part of the
+// recorded delegation so a later Undo doesn't try to reverse it again.
+async function removeCoverReporting(userId, date) {
+  const ref = doc(db, 'exemptions', `${date}__${userId}`);
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) { toast('No leave record found', true); return; }
+    const g = snap.data().delegation;
+    if (!g || !(g.assignmentIds || []).length) { toast('No reporting was given to the cover', true); return; }
+    if (!confirm(`Remove the delegated report(s) from ${g.coverName || 'the cover'}? Their tasks and the leave stay as they are.`)) return;
+    const batch = writeBatch(db);
+    const coverCode = g.coverUniqueId ? doc(db, 'codes', g.coverUniqueId) : null;
+    g.assignmentIds.forEach((id) => batch.delete(doc(db, 'assignments', id)));
+    if (coverCode) {
+      try { const cs = await getDoc(coverCode); if (cs.exists()) batch.update(coverCode, { questionnaires: (cs.data().questionnaires || []).filter((e) => !g.assignmentIds.includes(e.assignmentId)) }); } catch { /* ignore */ }
+    }
+    batch.update(ref, { delegation: { ...g, assignmentIds: [] } });
+    await batch.commit();
+    toast('Reporting removed from cover'); renderDashboard();
   } catch (e) { toast(friendlyError(e), true); }
 }
 // Mark on leave, and optionally hand the person's reporting + tasks to a cover.
